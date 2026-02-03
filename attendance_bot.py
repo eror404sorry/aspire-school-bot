@@ -3,7 +3,6 @@
 ASPIRATION BOT - Aspire Youth Academy Grade 8
 Complete Assignment & Attendance System
 Author: System Administrator
-Version: 3.3 - Added /present command
 """
 
 import telebot
@@ -351,45 +350,6 @@ class AttendanceManager:
         else:
             return False, "📝 You are already marked present for today."
     
-    def mark_absent_by_username(self, username):
-        """Mark user as absent by username"""
-        today = datetime.now().strftime("%Y-%m-%d")
-        
-        if today not in self.attendance:
-            self.attendance[today] = {}
-        
-        # Create a unique ID for absent students
-        user_id = f"absent_{username}_{int(datetime.now().timestamp())}"
-        
-        self.attendance[today][user_id] = {
-            "username": username,
-            "first_name": username,
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "type": "manual_absent",
-            "status": "absent"
-        }
-        self.save_attendance()
-        
-        return True, f"✅ @{username} marked ABSENT for today"
-    
-    def mark_absent_by_id(self, user_id, username, first_name):
-        """Mark user as absent by user ID"""
-        today = datetime.now().strftime("%Y-%m-%d")
-        
-        if today not in self.attendance:
-            self.attendance[today] = {}
-        
-        self.attendance[today][str(user_id)] = {
-            "username": username,
-            "first_name": first_name,
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "type": "manual",
-            "status": "absent"
-        }
-        self.save_attendance()
-        
-        return True, f"✅ {first_name} (@{username}) marked ABSENT for today"
-    
     def get_user_attendance(self, user_id):
         """Get user's attendance record"""
         user_id = str(user_id)
@@ -433,6 +393,24 @@ class AttendanceManager:
         if date_str in self.attendance:
             return self.attendance[date_str]
         return {}
+    
+    def mark_absent(self, user_id, username, first_name):
+        """Mark user as absent for today"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        if today not in self.attendance:
+            self.attendance[today] = {}
+        
+        self.attendance[today][str(user_id)] = {
+            "username": username,
+            "first_name": first_name,
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "type": "manual",
+            "status": "absent"
+        }
+        self.save_attendance()
+        
+        return True, "📝 You have been marked ABSENT for today."
 
 # ===================== USER MANAGER =====================
 class UserManager:
@@ -538,7 +516,7 @@ class AssignmentBot:
         
         print("=" * 60)
         print(f"🏫 {SCHOOL_NAME} - {GRADE}")
-        print(f"🤖 Assignment Bot v3.3")
+        print(f"🤖 Assignment Bot v3.0")
         print("=" * 60)
         print(f"👑 Super Admins: @sh3ll_3xp10it, @dagi_tariku")
         print(f"👨‍💼 Total Admins: {len(self.user_manager.admins)}")
@@ -715,263 +693,6 @@ class AssignmentBot:
                 is_manual=True
             )
             self.bot.reply_to(message, result)
-        
-        # ========== MARK ABSENT COMMAND ==========
-        @self.bot.message_handler(commands=['markabsent', 'markabsence', 'absent'])
-        def mark_absent_handler(message):
-            """Mark a student as absent (teachers/admins only)"""
-            user = message.from_user
-            username = user.username
-            
-            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
-                self.bot.reply_to(message,
-                    "🚫 <b>ACCESS DENIED</b>\n\n"
-                    "Only teachers and administrators can mark students absent."
-                )
-                return
-            
-            parts = message.text.split()
-            if len(parts) < 2:
-                self.bot.reply_to(message,
-                    "📝 <b>MARK STUDENT ABSENT</b>\n\n"
-                    "⚠️ <b>Usage:</b> <code>/markabsent [username]</code>\n\n"
-                    "<b>Example:</b>\n"
-                    "<code>/markabsent john_student</code>\n\n"
-                    "💡 <b>Note:</b>\n"
-                    "• Username without @ symbol\n"
-                    "• Use /liststudents to see today's attendance"
-                )
-                return
-            
-            student_username = parts[1].replace("@", "").lower()
-            
-            # Mark absent
-            success, result = self.attendance.mark_absent_by_username(student_username)
-            
-            if success:
-                response = (
-                    f"📝 <b>ABSENCE RECORDED</b>\n\n"
-                    f"👨‍🎓 Student: @{student_username}\n"
-                    f"👨‍🏫 Marked by: @{username}\n"
-                    f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n"
-                    f"🕒 Time: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                    f"📊 Student has been marked ABSENT for today."
-                )
-            else:
-                response = result
-            
-            self.bot.reply_to(message, response)
-        
-        # ========== IMPROVED: LIST STUDENTS COMMAND ==========
-        @self.bot.message_handler(commands=['liststudents', 'students'])
-        def list_students_handler(message):
-            """List all students who have used the bot"""
-            username = message.from_user.username
-            
-            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
-                self.bot.reply_to(message,
-                    "🚫 <b>ACCESS DENIED</b>\n\n"
-                    "Only teachers and administrators can view student list."
-                )
-                return
-            
-            # Get today's attendance
-            today = datetime.now().strftime("%Y-%m-%d")
-            today_attendance = self.attendance.get_daily_attendance(today)
-            
-            if not today_attendance:
-                response = "📭 No students recorded today."
-            else:
-                present = []
-                absent = []
-                
-                for user_id, data in today_attendance.items():
-                    # Get display name (use first_name if no username)
-                    username_display = data.get("username", "")
-                    first_name = data.get("first_name", "Unknown")
-                    
-                    # Handle cases where username is None or empty
-                    if not username_display or username_display == "None" or username_display == "null":
-                        if first_name and first_name != "Unknown":
-                            display_name = f"{first_name} (No username)"
-                        else:
-                            display_name = "Unknown User"
-                    else:
-                        if username_display.startswith("@"):
-                            display_name = username_display
-                        else:
-                            display_name = f"@{username_display}"
-                    
-                    student_info = {
-                        "display": display_name,
-                        "time": data.get("time", "Unknown"),
-                        "first_name": first_name,
-                        "username": username_display if username_display not in ["None", "null", ""] else "No username"
-                    }
-                    
-                    if data.get("status") == "present":
-                        present.append(student_info)
-                    else:
-                        absent.append(student_info)
-                
-                # Sort present students by time
-                present.sort(key=lambda x: x.get("time", ""))
-                
-                response = (
-                    f"📊 <b>TODAY'S ATTENDANCE REPORT</b>\n"
-                    f"📅 {today}\n\n"
-                    
-                    f"✅ <b>PRESENT ({len(present)}):</b>\n"
-                )
-                
-                # Show present students
-                for i, student in enumerate(present[:20], 1):
-                    time_display = f" - {student['time']}" if student.get('time') and student['time'] != "Unknown" else ""
-                    response += f"{i}. {student['display']}{time_display}\n"
-                
-                if len(present) > 20:
-                    response += f"... and {len(present)-20} more\n"
-                
-                # Show absent students
-                response += f"\n❌ <b>ABSENT ({len(absent)}):</b>\n"
-                
-                if absent:
-                    for i, student in enumerate(absent[:10], 1):
-                        time_display = f" - {student['time']}" if student.get('time') and student['time'] != "Unknown" else ""
-                        response += f"{i}. {student['display']}{time_display}\n"
-                    
-                    if len(absent) > 10:
-                        response += f"... and {len(absent)-10} more\n"
-                else:
-                    response += "🎉 No absent students today!\n"
-                
-                # Add statistics
-                response += f"\n📈 <b>ATTENDANCE STATISTICS:</b>\n"
-                response += f"• Total Students: {len(present) + len(absent)}\n"
-                response += f"• Present: {len(present)} students\n"
-                response += f"• Absent: {len(absent)} students\n"
-                
-                if (len(present) + len(absent)) > 0:
-                    attendance_rate = (len(present) / (len(present) + len(absent))) * 100
-                    response += f"• Attendance Rate: {attendance_rate:.1f}%\n"
-                
-                response += f"\n⏰ Report generated: {datetime.now().strftime('%H:%M:%S')}"
-            
-            self.bot.reply_to(message, response)
-        
-        # ========== NEW: PRESENT COMMAND ==========
-        @self.bot.message_handler(commands=['present', 'presentlist', 'rollcall'])
-        def present_handler(message):
-            """Show only present students (teachers/admins only)"""
-            username = message.from_user.username
-            
-            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
-                self.bot.reply_to(message,
-                    "🚫 <b>ACCESS DENIED</b>\n\n"
-                    "Only teachers and administrators can view present list."
-                )
-                return
-            
-            # Get today's attendance
-            today = datetime.now().strftime("%Y-%m-%d")
-            today_attendance = self.attendance.get_daily_attendance(today)
-            
-            if not today_attendance:
-                response = "📭 No students recorded today."
-            else:
-                present = []
-                
-                for user_id, data in today_attendance.items():
-                    if data.get("status") == "present":
-                        # Get display name (use first_name if no username)
-                        username_display = data.get("username", "")
-                        first_name = data.get("first_name", "Unknown")
-                        
-                        # Handle cases where username is None or empty
-                        if not username_display or username_display == "None" or username_display == "null":
-                            if first_name and first_name != "Unknown":
-                                display_name = f"{first_name}"
-                            else:
-                                display_name = "Unknown User"
-                        else:
-                            if username_display.startswith("@"):
-                                display_name = username_display
-                            else:
-                                display_name = f"@{username_display}"
-                        
-                        student_info = {
-                            "display": display_name,
-                            "time": data.get("time", "Unknown"),
-                            "first_name": first_name,
-                            "username": username_display if username_display not in ["None", "null", ""] else "No username"
-                        }
-                        present.append(student_info)
-                
-                # Sort present students by time
-                present.sort(key=lambda x: x.get("time", ""))
-                
-                if not present:
-                    response = "📭 No students are marked present today."
-                else:
-                    response = (
-                        f"✅ <b>ROLL CALL - PRESENT STUDENTS</b>\n"
-                        f"📅 {today}\n\n"
-                        
-                        f"👥 <b>Total Present: {len(present)} students</b>\n\n"
-                    )
-                    
-                    # Group by time (morning, afternoon, etc.)
-                    morning = []
-                    afternoon = []
-                    evening = []
-                    
-                    for student in present:
-                        time_str = student.get("time", "00:00:00")
-                        try:
-                            hour = int(time_str.split(":")[0])
-                            if hour < 12:
-                                morning.append(student)
-                            elif hour < 17:
-                                afternoon.append(student)
-                            else:
-                                evening.append(student)
-                        except:
-                            morning.append(student)  # Default to morning if time parsing fails
-                    
-                    # Show by time period
-                    if morning:
-                        response += f"🌅 <b>Morning ({len(morning)}):</b>\n"
-                        for i, student in enumerate(morning[:15], 1):
-                            response += f"{i}. {student['display']} - {student['time']}\n"
-                        if len(morning) > 15:
-                            response += f"... and {len(morning)-15} more\n"
-                        response += "\n"
-                    
-                    if afternoon:
-                        response += f"☀️ <b>Afternoon ({len(afternoon)}):</b>\n"
-                        for i, student in enumerate(afternoon[:10], 1):
-                            response += f"{i}. {student['display']} - {student['time']}\n"
-                        if len(afternoon) > 10:
-                            response += f"... and {len(afternoon)-10} more\n"
-                        response += "\n"
-                    
-                    if evening:
-                        response += f"🌙 <b>Evening ({len(evening)}):</b>\n"
-                        for i, student in enumerate(evening[:5], 1):
-                            response += f"{i}. {student['display']} - {student['time']}\n"
-                        if len(evening) > 5:
-                            response += f"... and {len(evening)-5} more\n"
-                        response += "\n"
-                    
-                    # Quick statistics
-                    response += f"📊 <b>QUICK STATS:</b>\n"
-                    response += f"• First to arrive: {present[0]['display']} at {present[0]['time']}\n"
-                    if len(present) > 1:
-                        response += f"• Last to arrive: {present[-1]['display']} at {present[-1]['time']}\n"
-                    
-                    response += f"\n⏰ Report generated: {datetime.now().strftime('%H:%M:%S')}"
-            
-            self.bot.reply_to(message, response)
         
         # ========== ADMIN MANAGEMENT COMMANDS ==========
         @self.bot.message_handler(commands=['addadmin'])
@@ -1662,8 +1383,7 @@ class AssignmentBot:
                 
                 f"📅 <b>TODAY'S ATTENDANCE:</b>\n"
                 f"• Date: {today}\n"
-                f"• Present Today: {len([x for x in today_attendance.values() if x['status'] == 'present'])}\n"
-                f"• Absent Today: {len([x for x in today_attendance.values() if x['status'] == 'absent'])}\n\n"
+                f"• Present Today: {len(today_attendance)}\n\n"
                 
                 f"👤 <b>YOUR ROLE:</b>\n"
             )
@@ -1684,6 +1404,7 @@ class AssignmentBot:
         @self.bot.message_handler(func=lambda message: True)
         def handle_all_messages(message):
             """Handle all other messages"""
+            # You can add custom message handling here
             if message.text.lower() in ['hi', 'hello', 'hey']:
                 self.bot.reply_to(message,
                     f"👋 Hello {message.from_user.first_name}!\n"
@@ -1703,11 +1424,6 @@ class AssignmentBot:
             f"<code>/inbox</code> - View student submissions\n"
             f"<code>/grade</code> - Grade student work\n"
             f"<code>/assignmentstats</code> - View assignment statistics\n\n"
-            
-            f"📊 <b>ATTENDANCE MANAGEMENT:</b>\n"
-            f"<code>/markabsent @username</code> - Mark student absent\n"
-            f"<code>/liststudents</code> - View today's attendance\n"
-            f"<code>/present</code> - View present students only\n\n"
             
             f"👥 <b>USER MANAGEMENT:</b>\n"
             f"<code>/addteacher</code> - Add new teacher\n"
@@ -1739,12 +1455,7 @@ class AssignmentBot:
             f"<code>/grade</code> - Grade student work\n"
             f"<code>/assignmentstats</code> - View assignment statistics\n\n"
             
-            f"📊 <b>ATTENDANCE MANAGEMENT:</b>\n"
-            f"<code>/markabsent @username</code> - Mark student absent\n"
-            f"<code>/liststudents</code> - View today's attendance\n"
-            f"<code>/present</code> - View present students only\n\n"
-            
-            f"👥 <b>USER MANAGEMENT:</b>\n"
+            f"📊 <b>STUDENT MONITORING:</b>\n"
             f"<code>/listteachers</code> - List all teachers\n"
             f"<code>/status</code> - View system status\n\n"
             

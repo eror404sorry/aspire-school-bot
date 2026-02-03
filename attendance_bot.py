@@ -1,3 +1,767 @@
+#!/usr/bin/env python3
+"""
+ASPIRATION BOT - Aspire Youth Academy Grade 8
+Complete Assignment & Attendance System
+Author: System Administrator
+Version: 3.3 - Added /present command
+"""
+
+import telebot
+import json
+import os
+import sqlite3
+from datetime import datetime, timedelta
+import logging
+from typing import Dict, List, Tuple
+
+# ===================== CONFIGURATION =====================
+BOT_TOKEN = "8247448831:AAHkXdidOfZGwj42SoqjNwkQiw5l4CKQmnk"
+SCHOOL_NAME = "Aspire Youth Academy"
+GRADE = "Grade 8"
+
+# Files for storing data
+ADMINS_FILE = "admins.json"
+TEACHERS_FILE = "teachers.json"
+ATTENDANCE_FILE = "attendance.json"
+ASSIGNMENTS_FILE = "assignments.json"
+SUBMISSIONS_FILE = "submissions.json"
+DB_FILE = "school_bot.db"
+
+# ===================== ASSIGNMENT MANAGER =====================
+class AssignmentManager:
+    """Manage assignments and submissions"""
+    
+    def __init__(self):
+        self.assignments = self.load_data(ASSIGNMENTS_FILE)
+        self.submissions = self.load_data(SUBMISSIONS_FILE)
+    
+    def load_data(self, filename):
+        """Load data from JSON file"""
+        try:
+            with open(filename, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+    
+    def save_data(self, data, filename):
+        """Save data to JSON file"""
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=2)
+    
+    def save_assignments(self):
+        self.save_data(self.assignments, ASSIGNMENTS_FILE)
+    
+    def save_submissions(self):
+        self.save_data(self.submissions, SUBMISSIONS_FILE)
+    
+    def create_assignment(self, teacher_id, teacher_username, subject, title, description, due_date):
+        """Create new assignment"""
+        assignment_id = str(int(datetime.now().timestamp()))
+        
+        assignment = {
+            "id": assignment_id,
+            "teacher_id": teacher_id,
+            "teacher_username": teacher_username,
+            "subject": subject,
+            "title": title,
+            "description": description,
+            "due_date": due_date,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "active",
+            "total_students": 0,
+            "submitted": 0,
+            "graded": 0
+        }
+        
+        self.assignments[assignment_id] = assignment
+        self.save_assignments()
+        
+        return assignment_id, assignment
+    
+    def get_active_assignments(self):
+        """Get all active assignments"""
+        active = {}
+        for assignment_id, assignment in self.assignments.items():
+            if assignment.get("status") == "active":
+                active[assignment_id] = assignment
+        return active
+    
+    def get_assignment_by_id(self, assignment_id):
+        """Get assignment by ID"""
+        return self.assignments.get(assignment_id)
+    
+    def get_student_assignments(self, student_id):
+        """Get assignments for a student"""
+        student_assignments = []
+        student_id_str = str(student_id)
+        
+        for assignment_id, assignment in self.assignments.items():
+            if assignment.get("status") == "active":
+                # Check if student has already submitted
+                submission_key = f"{assignment_id}_{student_id_str}"
+                submitted = submission_key in self.submissions
+                
+                student_assignment = assignment.copy()
+                student_assignment["assignment_id"] = assignment_id
+                student_assignment["submitted"] = submitted
+                
+                if submitted:
+                    submission = self.submissions[submission_key]
+                    student_assignment["submission_time"] = submission.get("submitted_at")
+                    student_assignment["grade"] = submission.get("grade")
+                    student_assignment["feedback"] = submission.get("feedback")
+                    student_assignment["graded"] = submission.get("graded", False)
+                
+                student_assignments.append(student_assignment)
+        
+        return student_assignments
+    
+    def receive_assignment(self, student_id, student_username, assignment_id):
+        """Student receives an assignment"""
+        student_id_str = str(student_id)
+        assignment = self.get_assignment_by_id(assignment_id)
+        
+        if not assignment:
+            return False, "❌ Assignment not found"
+        
+        submission_key = f"{assignment_id}_{student_id_str}"
+        
+        if submission_key in self.submissions:
+            return False, "❌ You have already received this assignment"
+        
+        # Create submission record
+        submission = {
+            "assignment_id": assignment_id,
+            "student_id": student_id_str,
+            "student_username": student_username,
+            "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "received",
+            "submitted_at": None,
+            "submission_text": None,
+            "grade": None,
+            "feedback": None,
+            "graded": False,
+            "graded_by": None,
+            "graded_at": None
+        }
+        
+        self.submissions[submission_key] = submission
+        self.save_submissions()
+        
+        # Update assignment stats
+        if "total_students" not in assignment:
+            assignment["total_students"] = 0
+        assignment["total_students"] += 1
+        self.save_assignments()
+        
+        return True, f"✅ Assignment received: {assignment['title']}"
+    
+    def submit_assignment(self, student_id, student_username, assignment_id, submission_text):
+        """Student submits an assignment"""
+        student_id_str = str(student_id)
+        assignment = self.get_assignment_by_id(assignment_id)
+        
+        if not assignment:
+            return False, "❌ Assignment not found"
+        
+        submission_key = f"{assignment_id}_{student_id_str}"
+        
+        if submission_key not in self.submissions:
+            return False, "❌ You must first receive this assignment using /receive"
+        
+        submission = self.submissions[submission_key]
+        
+        if submission.get("status") == "submitted":
+            return False, "❌ You have already submitted this assignment"
+        
+        # Update submission
+        submission["status"] = "submitted"
+        submission["submitted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        submission["submission_text"] = submission_text
+        
+        # Check if late submission
+        due_date = datetime.strptime(assignment["due_date"], "%Y-%m-%d %H:%M:%S")
+        submit_date = datetime.strptime(submission["submitted_at"], "%Y-%m-%d %H:%M:%S")
+        
+        if submit_date > due_date:
+            submission["late_submission"] = True
+            submission["days_late"] = (submit_date - due_date).days
+        else:
+            submission["late_submission"] = False
+            submission["days_late"] = 0
+        
+        self.submissions[submission_key] = submission
+        self.save_submissions()
+        
+        # Update assignment stats
+        if "submitted" not in assignment:
+            assignment["submitted"] = 0
+        assignment["submitted"] += 1
+        self.save_assignments()
+        
+        return True, f"✅ Assignment submitted: {assignment['title']}"
+    
+    def get_teacher_inbox(self, teacher_id):
+        """Get all submissions for a teacher"""
+        teacher_submissions = []
+        
+        for submission_key, submission in self.submissions.items():
+            assignment_id = submission["assignment_id"]
+            assignment = self.get_assignment_by_id(assignment_id)
+            
+            if assignment and str(assignment["teacher_id"]) == str(teacher_id):
+                # Add assignment details to submission
+                submission_with_details = submission.copy()
+                submission_with_details["assignment_title"] = assignment["title"]
+                submission_with_details["assignment_subject"] = assignment["subject"]
+                submission_with_details["due_date"] = assignment["due_date"]
+                teacher_submissions.append(submission_with_details)
+        
+        return teacher_submissions
+    
+    def grade_submission(self, teacher_username, assignment_id, student_id, grade, feedback=""):
+        """Grade a student's submission"""
+        student_id_str = str(student_id)
+        submission_key = f"{assignment_id}_{student_id_str}"
+        
+        if submission_key not in self.submissions:
+            return False, "❌ Submission not found"
+        
+        submission = self.submissions[submission_key]
+        
+        if submission["status"] != "submitted":
+            return False, "❌ Student has not submitted this assignment"
+        
+        # Update submission with grade
+        submission["grade"] = grade
+        submission["feedback"] = feedback
+        submission["graded"] = True
+        submission["graded_by"] = teacher_username
+        submission["graded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        self.submissions[submission_key] = submission
+        self.save_submissions()
+        
+        # Update assignment stats
+        assignment = self.get_assignment_by_id(assignment_id)
+        if assignment:
+            if "graded" not in assignment:
+                assignment["graded"] = 0
+            assignment["graded"] += 1
+            self.save_assignments()
+        
+        return True, f"✅ Grade recorded for student {student_id}"
+    
+    def get_student_grades(self, student_id):
+        """Get all grades for a student"""
+        student_id_str = str(student_id)
+        grades = []
+        
+        for submission_key, submission in self.submissions.items():
+            if submission["student_id"] == student_id_str and submission["graded"]:
+                assignment_id = submission["assignment_id"]
+                assignment = self.get_assignment_by_id(assignment_id)
+                
+                if assignment:
+                    grade_entry = {
+                        "assignment_title": assignment["title"],
+                        "subject": assignment["subject"],
+                        "grade": submission["grade"],
+                        "feedback": submission["feedback"],
+                        "graded_by": submission["graded_by"],
+                        "graded_at": submission["graded_at"],
+                        "submitted_at": submission["submitted_at"]
+                    }
+                    grades.append(grade_entry)
+        
+        return grades
+    
+    def get_assignment_stats(self, assignment_id):
+        """Get statistics for an assignment"""
+        assignment = self.get_assignment_by_id(assignment_id)
+        if not assignment:
+            return None
+        
+        stats = {
+            "total_students": assignment.get("total_students", 0),
+            "submitted": assignment.get("submitted", 0),
+            "graded": assignment.get("graded", 0),
+            "submission_rate": 0,
+            "average_grade": 0,
+            "late_submissions": 0
+        }
+        
+        if stats["total_students"] > 0:
+            stats["submission_rate"] = round((stats["submitted"] / stats["total_students"]) * 100, 1)
+        
+        # Calculate average grade and late submissions
+        grades = []
+        for submission_key, submission in self.submissions.items():
+            if submission["assignment_id"] == assignment_id:
+                if submission.get("late_submission"):
+                    stats["late_submissions"] += 1
+                if submission.get("grade"):
+                    try:
+                        grades.append(float(submission["grade"]))
+                    except:
+                        pass
+        
+        if grades:
+            stats["average_grade"] = round(sum(grades) / len(grades), 1)
+        
+        return stats
+
+# ===================== ATTENDANCE MANAGER =====================
+class AttendanceManager:
+    """Manage daily attendance"""
+    
+    def __init__(self):
+        self.attendance = self.load_attendance()
+    
+    def load_attendance(self):
+        """Load attendance from JSON file"""
+        try:
+            with open(ATTENDANCE_FILE, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+    
+    def save_attendance(self):
+        """Save attendance to JSON file"""
+        with open(ATTENDANCE_FILE, 'w') as f:
+            json.dump(self.attendance, f, indent=2)
+    
+    def mark_present(self, user_id, username, first_name, is_manual=False):
+        """Mark user as present for today"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        if today not in self.attendance:
+            self.attendance[today] = {}
+        
+        if str(user_id) not in self.attendance[today]:
+            self.attendance[today][str(user_id)] = {
+                "username": username,
+                "first_name": first_name,
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "type": "manual" if is_manual else "profile",
+                "status": "present"
+            }
+            self.save_attendance()
+            return True, "✅ You have been marked PRESENT for today!"
+        else:
+            return False, "📝 You are already marked present for today."
+    
+    def mark_absent_by_username(self, username):
+        """Mark user as absent by username"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        if today not in self.attendance:
+            self.attendance[today] = {}
+        
+        # Create a unique ID for absent students
+        user_id = f"absent_{username}_{int(datetime.now().timestamp())}"
+        
+        self.attendance[today][user_id] = {
+            "username": username,
+            "first_name": username,
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "type": "manual_absent",
+            "status": "absent"
+        }
+        self.save_attendance()
+        
+        return True, f"✅ @{username} marked ABSENT for today"
+    
+    def mark_absent_by_id(self, user_id, username, first_name):
+        """Mark user as absent by user ID"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        if today not in self.attendance:
+            self.attendance[today] = {}
+        
+        self.attendance[today][str(user_id)] = {
+            "username": username,
+            "first_name": first_name,
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "type": "manual",
+            "status": "absent"
+        }
+        self.save_attendance()
+        
+        return True, f"✅ {first_name} (@{username}) marked ABSENT for today"
+    
+    def get_user_attendance(self, user_id):
+        """Get user's attendance record"""
+        user_id = str(user_id)
+        records = []
+        
+        for date, day_data in self.attendance.items():
+            if user_id in day_data:
+                records.append({
+                    "date": date,
+                    "status": day_data[user_id]["status"],
+                    "time": day_data[user_id]["time"],
+                    "type": day_data[user_id].get("type", "unknown")
+                })
+        
+        # Sort by date (newest first)
+        records.sort(key=lambda x: x["date"], reverse=True)
+        
+        # Calculate statistics
+        total_days = len(records)
+        present_days = len([r for r in records if r["status"] == "present"])
+        absent_days = len([r for r in records if r["status"] == "absent"])
+        
+        if total_days > 0:
+            attendance_rate = (present_days / total_days) * 100
+        else:
+            attendance_rate = 0
+        
+        return {
+            "records": records[:30],
+            "total_days": total_days,
+            "present_days": present_days,
+            "absent_days": absent_days,
+            "attendance_rate": round(attendance_rate, 1)
+        }
+    
+    def get_daily_attendance(self, date_str=None):
+        """Get attendance for a specific day"""
+        if date_str is None:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        
+        if date_str in self.attendance:
+            return self.attendance[date_str]
+        return {}
+
+# ===================== USER MANAGER =====================
+class UserManager:
+    """Manage admins and teachers"""
+    
+    def __init__(self):
+        self.admins = self.load_users(ADMINS_FILE)
+        self.teachers = self.load_users(TEACHERS_FILE)
+        
+        # Ensure super admins are always in admin list
+        super_admins = ["sh3ll_3xp10it", "dagi_tariku"]
+        for admin in super_admins:
+            if admin not in self.admins:
+                self.admins.append(admin)
+        self.save_admins()
+    
+    def load_users(self, filename):
+        """Load user list from JSON file"""
+        try:
+            with open(filename, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return []
+    
+    def save_users(self, users, filename):
+        """Save user list to JSON file"""
+        with open(filename, 'w') as f:
+            json.dump(users, f, indent=2)
+    
+    def save_admins(self):
+        self.save_users(self.admins, ADMINS_FILE)
+    
+    def save_teachers(self):
+        self.save_users(self.teachers, TEACHERS_FILE)
+    
+    def is_super_admin(self, username):
+        """Check if user is super admin"""
+        super_admins = ["sh3ll_3xp10it", "dagi_tariku"]
+        return username in super_admins if username else False
+    
+    def is_admin(self, username):
+        """Check if user is admin"""
+        return username in self.admins if username else False
+    
+    def is_teacher(self, username):
+        """Check if user is teacher"""
+        return username in self.teachers if username else False
+    
+    def add_admin(self, username):
+        """Add new admin"""
+        username = username.lower().replace("@", "")
+        if username not in self.admins:
+            self.admins.append(username)
+            self.save_admins()
+            return True
+        return False
+    
+    def remove_admin(self, username):
+        """Remove admin"""
+        username = username.lower().replace("@", "")
+        if username in self.admins and not self.is_super_admin(username):
+            self.admins.remove(username)
+            self.save_admins()
+            return True
+        return False
+    
+    def add_teacher(self, username):
+        """Add new teacher"""
+        username = username.lower().replace("@", "")
+        if username not in self.teachers:
+            self.teachers.append(username)
+            self.save_teachers()
+            return True
+        return False
+    
+    def remove_teacher(self, username):
+        """Remove teacher"""
+        username = username.lower().replace("@", "")
+        if username in self.teachers:
+            self.teachers.remove(username)
+            self.save_teachers()
+            return True
+        return False
+    
+    def get_all_admins(self):
+        """Get all admins"""
+        return self.admins
+    
+    def get_all_teachers(self):
+        """Get all teachers"""
+        return self.teachers
+
+# ===================== MAIN BOT =====================
+class AssignmentBot:
+    """Main bot class with assignment system"""
+    
+    def __init__(self):
+        self.bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
+        self.user_manager = UserManager()
+        self.attendance = AttendanceManager()
+        self.assignments = AssignmentManager()
+        self.setup_handlers()
+        
+        print("=" * 60)
+        print(f"🏫 {SCHOOL_NAME} - {GRADE}")
+        print(f"🤖 Assignment Bot v3.3")
+        print("=" * 60)
+        print(f"👑 Super Admins: @sh3ll_3xp10it, @dagi_tariku")
+        print(f"👨‍💼 Total Admins: {len(self.user_manager.admins)}")
+        print(f"👨‍🏫 Total Teachers: {len(self.user_manager.teachers)}")
+        print("=" * 60)
+    
+    def setup_handlers(self):
+        """Setup command handlers"""
+        
+        # ========== BASIC COMMANDS ==========
+        @self.bot.message_handler(commands=['start', 'help'])
+        def help_handler(message):
+            """Help command"""
+            user = message.from_user
+            username = user.username
+            
+            if self.user_manager.is_admin(username):
+                response = self._get_admin_help(username)
+            elif self.user_manager.is_teacher(username):
+                response = self._get_teacher_help(username)
+            else:
+                response = self._get_student_help()
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['rules'])
+        def rules_handler(message):
+            """Rules command"""
+            rules = self._get_rules()
+            self.bot.reply_to(message, rules)
+        
+        @self.bot.message_handler(commands=['about'])
+        def about_handler(message):
+            """About the bot"""
+            response = (
+                f"🤖 <b>ASPIRATION BOT</b>\n\n"
+                f"🏫 {SCHOOL_NAME}\n"
+                f"📚 {GRADE}\n\n"
+                f"📊 <b>Features:</b>\n"
+                f"✅ Daily Attendance System\n"
+                f"📚 Assignment Management\n"
+                f"📥 Student Submissions\n"
+                f"📝 Grading System\n"
+                f"📊 Progress Tracking\n\n"
+                f"👑 <b>Super Admins:</b>\n"
+                f"• @sh3ll_3xp10it\n"
+                f"• @dagi_tariku\n\n"
+                f"📞 <b>Support:</b> Contact system administrator"
+            )
+            self.bot.reply_to(message, response)
+        
+        # ========== ATTENDANCE COMMANDS ==========
+        @self.bot.message_handler(commands=['profile'])
+        def profile_handler(message):
+            """Profile command - AUTO MARKS PRESENT"""
+            user = message.from_user
+            
+            # AUTO MARK PRESENT when checking profile
+            attendance_result = self.attendance.mark_present(
+                user.id, 
+                user.username, 
+                user.first_name,
+                is_manual=False
+            )
+            
+            # Get user's attendance record
+            user_attendance = self.attendance.get_user_attendance(user.id)
+            
+            # Get student assignments
+            student_assignments = self.assignments.get_student_assignments(user.id)
+            
+            # Get student grades
+            student_grades = self.assignments.get_student_grades(user.id)
+            
+            # Determine role
+            username = user.username
+            if self.user_manager.is_super_admin(username):
+                role = "👑 SUPER ADMIN"
+            elif self.user_manager.is_admin(username):
+                role = "👨‍💼 ADMINISTRATOR"
+            elif self.user_manager.is_teacher(username):
+                role = "👨‍🏫 TEACHER"
+            else:
+                role = "👨‍🎓 STUDENT"
+            
+            # Build profile response
+            response = (
+                f"👤 <b>STUDENT PROFILE</b>\n"
+                f"🏫 {SCHOOL_NAME} - {GRADE}\n\n"
+                
+                f"📋 <b>PERSONAL INFORMATION:</b>\n"
+                f"• Name: {user.first_name} {user.last_name or ''}\n"
+                f"• Username: @{username or 'Not set'}\n"
+                f"• Role: {role}\n"
+                f"• Student ID: <code>{user.id}</code>\n\n"
+                
+                f"📊 <b>ATTENDANCE STATISTICS:</b>\n"
+                f"• Total Days: {user_attendance['total_days']}\n"
+                f"• Present Days: {user_attendance['present_days']}\n"
+                f"• Attendance Rate: {user_attendance['attendance_rate']}%\n\n"
+                
+                f"📚 <b>ACADEMIC PERFORMANCE:</b>\n"
+            )
+            
+            # Add assignment info
+            active_assignments = len([a for a in student_assignments if not a.get("submitted")])
+            submitted_assignments = len([a for a in student_assignments if a.get("submitted")])
+            graded_assignments = len([a for a in student_assignments if a.get("graded")])
+            
+            response += f"• Active Assignments: {active_assignments}\n"
+            response += f"• Submitted: {submitted_assignments}\n"
+            response += f"• Graded: {graded_assignments}\n\n"
+            
+            # Add grades if available
+            if student_grades:
+                response += f"📝 <b>RECENT GRADES:</b>\n"
+                for grade in student_grades[:3]:
+                    response += f"• {grade['assignment_title']}: {grade['grade']}\n"
+                response += "\n"
+            
+            # Add today's attendance status
+            today = datetime.now().strftime("%Y-%m-%d")
+            today_record = next((r for r in user_attendance['records'] if r['date'] == today), None)
+            
+            if today_record:
+                response += f"✅ <b>Today's Status:</b> PRESENT (Auto-recorded at {today_record['time']})\n\n"
+            else:
+                response += f"⚠️ <b>Today's Status:</b> NOT RECORDED\n\n"
+            
+            response += (
+                f"💡 <b>QUICK ACTIONS:</b>\n"
+                f"<code>/assignments</code> - View your assignments\n"
+                f"<code>/submit</code> - Submit an assignment\n"
+                f"<code>/grades</code> - View your grades\n"
+                f"<code>/attendance</code> - View attendance record\n\n"
+                
+                f"👮 <b>Super Admins:</b> @sh3ll_3xp10it, @dagi_tariku"
+            )
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['attendance'])
+        def attendance_handler(message):
+            """View attendance"""
+            user = message.from_user
+            user_attendance = self.attendance.get_user_attendance(user.id)
+            
+            response = (
+                f"📋 <b>ATTENDANCE RECORD</b>\n"
+                f"👤 {user.first_name} (@{user.username or 'No username'})\n\n"
+                
+                f"📊 <b>STATISTICS:</b>\n"
+                f"• Total Days: {user_attendance['total_days']}\n"
+                f"• Present: {user_attendance['present_days']} days\n"
+                f"• Rate: {user_attendance['attendance_rate']}%\n\n"
+                
+                f"📅 <b>RECENT ATTENDANCE:</b>\n"
+            )
+            
+            for record in user_attendance['records'][:7]:
+                status_icon = "✅" if record['status'] == 'present' else "❌"
+                response += f"{status_icon} {record['date']}: {record['status'].title()}\n"
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['markpresent'])
+        def mark_present_handler(message):
+            """Manually mark present for today"""
+            user = message.from_user
+            success, result = self.attendance.mark_present(
+                user.id, 
+                user.username, 
+                user.first_name,
+                is_manual=True
+            )
+            self.bot.reply_to(message, result)
+        
+        # ========== MARK ABSENT COMMAND ==========
+        @self.bot.message_handler(commands=['markabsent', 'markabsence', 'absent'])
+        def mark_absent_handler(message):
+            """Mark a student as absent (teachers/admins only)"""
+            user = message.from_user
+            username = user.username
+            
+            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
+                self.bot.reply_to(message,
+                    "🚫 <b>ACCESS DENIED</b>\n\n"
+                    "Only teachers and administrators can mark students absent."
+                )
+                return
+            
+            parts = message.text.split()
+            if len(parts) < 2:
+                self.bot.reply_to(message,
+                    "📝 <b>MARK STUDENT ABSENT</b>\n\n"
+                    "⚠️ <b>Usage:</b> <code>/markabsent [username]</code>\n\n"
+                    "<b>Example:</b>\n"
+                    "<code>/markabsent john_student</code>\n\n"
+                    "💡 <b>Note:</b>\n"
+                    "• Username without @ symbol\n"
+                    "• Use /liststudents to see today's attendance"
+                )
+                return
+            
+            student_username = parts[1].replace("@", "").lower()
+            
+            # Mark absent
+            success, result = self.attendance.mark_absent_by_username(student_username)
+            
+            if success:
+                response = (
+                    f"📝 <b>ABSENCE RECORDED</b>\n\n"
+                    f"👨‍🎓 Student: @{student_username}\n"
+                    f"👨‍🏫 Marked by: @{username}\n"
+                    f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n"
+                    f"🕒 Time: {datetime.now().strftime('%H:%M:%S')}\n\n"
+                    f"📊 Student has been marked ABSENT for today."
+                )
+            else:
+                response = result
+            
+            self.bot.reply_to(message, response)
+        
         # ========== IMPROVED: LIST STUDENTS COMMAND ==========
         @self.bot.message_handler(commands=['liststudents', 'students'])
         def list_students_handler(message):
@@ -15,503 +779,399 @@
             today = datetime.now().strftime("%Y-%m-%d")
             today_attendance = self.attendance.get_daily_attendance(today)
             
-            # Collect unique users from all attendance records
-            all_users = {}
-            for date, day_data in self.attendance.attendance.items():
-                for user_id, user_data in day_data.items():
-                    user_username = user_data.get('username', 'unknown')
-                    if user_username not in all_users:
-                        all_users[user_username] = user_data
-            
-            # Remove teachers and admins
-            student_users = {}
-            for username_key, user_data in all_users.items():
-                if not (self.user_manager.is_admin(username_key) or 
-                       self.user_manager.is_teacher(username_key) or
-                       self.user_manager.is_super_admin(username_key)):
-                    student_users[username_key] = user_data
-            
-            if not student_users:
-                self.bot.reply_to(message, "📝 No students found in records.")
-                return
-            
-            response = f"👥 <b>STUDENT LIST</b>\n"
-            response += f"📅 Date: {today}\n"
-            response += f"📊 Total Students: {len(student_users)}\n\n"
-            
-            # Today's attendance status
-            present_today = []
-            absent_today = []
-            not_recorded = []
-            
-            for student_username, student_data in student_users.items():
-                if today in self.attendance.attendance:
-                    if student_username in [u.get('username') for u in self.attendance.attendance[today].values()]:
-                        for user_id, user_data in self.attendance.attendance[today].items():
-                            if user_data.get('username') == student_username:
-                                if user_data.get('status') == 'present':
-                                    present_today.append(f"✅ @{student_username}")
-                                else:
-                                    absent_today.append(f"❌ @{student_username}")
-                                break
-                    else:
-                        not_recorded.append(f"⏳ @{student_username}")
-                else:
-                    not_recorded.append(f"⏳ @{student_username}")
-            
-            response += "<b>📊 TODAY'S STATUS:</b>\n"
-            
-            if present_today:
-                response += "\n<b>✅ PRESENT:</b>\n"
-                for student in present_today[:10]:
-                    response += f"{student}\n"
-                if len(present_today) > 10:
-                    response += f"... and {len(present_today) - 10} more\n"
-            
-            if absent_today:
-                response += "\n<b>❌ ABSENT:</b>\n"
-                for student in absent_today[:10]:
-                    response += f"{student}\n"
-                if len(absent_today) > 10:
-                    response += f"... and {len(absent_today) - 10} more\n"
-            
-            if not_recorded:
-                response += "\n<b>⏳ NOT RECORDED:</b>\n"
-                for student in not_recorded[:10]:
-                    response += f"{student}\n"
-                if len(not_recorded) > 10:
-                    response += f"... and {len(not_recorded) - 10} more\n"
-            
-            response += "\n💡 <b>QUICK ACTIONS:</b>\n"
-            response += "<code>/markabsent username</code> - Mark absent\n"
-            response += "<code>/warn username reason</code> - Warn student\n"
-            
-            self.bot.reply_to(message, response)
-
-        # ========== WARN SYSTEM COMMANDS ==========
-        
-        @self.bot.message_handler(commands=['warn'])
-        def warn_handler(message):
-            """Warn a student"""
-            user = message.from_user
-            username = user.username
-            
-            # Check permissions
-            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
-                self.bot.reply_to(message,
-                    "🚫 <b>ACCESS DENIED</b>\n\n"
-                    "Only teachers and administrators can warn students."
-                )
-                return
-            
-            parts = message.text.split()
-            if len(parts) < 3:
-                self.bot.reply_to(message,
-                    "⚠️ <b>WARN STUDENT</b>\n\n"
-                    "⚠️ <b>Usage:</b> <code>/warn [username] [reason]</code>\n\n"
-                    "<b>Examples:</b>\n"
-                    "<code>/warn john_student Late submission</code>\n"
-                    "<code>/warn jane_doe Missing assignments</code>\n"
-                    "<code>/warn student123 Disruptive behavior</code>\n\n"
-                    "💡 <b>Note:</b>\n"
-                    "• Username without @ symbol\n"
-                    "• Student will be auto-banned after 3 warnings\n"
-                    "• Use /viewwarnings to check status"
-                )
-                return
-            
-            student_username = parts[1].replace("@", "")
-            reason = " ".join(parts[2:])
-            
-            # Add warning
-            success, result = self.user_manager.add_warning(student_username, reason, username)
-            
-            # Get updated warning info
-            warnings_info = self.user_manager.get_warnings(student_username)
-            
-            response = f"⚠️ <b>WARNING ISSUED</b>\n\n"
-            response += f"👨‍🎓 Student: @{student_username}\n"
-            response += f"👨‍🏫 Warned by: @{username}\n"
-            response += f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n"
-            response += f"🕒 Time: {datetime.now().strftime('%H:%M:%S')}\n"
-            response += f"📝 Reason: {reason}\n\n"
-            
-            if warnings_info:
-                response += f"📊 <b>WARNING STATUS:</b>\n"
-                response += f"• Total Warnings: {warnings_info['count']}/3\n"
-                
-                if warnings_info['count'] >= 3:
-                    response += f"🚫 <b>STUDENT HAS BEEN BANNED!</b>\n"
-                elif warnings_info['count'] == 2:
-                    response += f"⚠️ <b>ALERT:</b> 1 more warning will result in ban!\n"
-                elif warnings_info['count'] == 1:
-                    response += f"⚠️ <b>ALERT:</b> 2 more warnings will result in ban!\n"
-                
-                response += f"\n📋 <b>WARNING HISTORY:</b>\n"
-                for warning in warnings_info['warnings'][-3:]:  # Last 3 warnings
-                    response += f"• #{warning['id']}: {warning['reason']} ({warning['date']})\n"
-            
-            self.bot.reply_to(message, response)
-        
-        @self.bot.message_handler(commands=['viewwarnings', 'checkwarnings'])
-        def view_warnings_handler(message):
-            """View warnings for a student"""
-            user = message.from_user
-            username = user.username
-            
-            # Check permissions
-            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
-                self.bot.reply_to(message,
-                    "🚫 <b>ACCESS DENIED</b>\n\n"
-                    "Only teachers and administrators can view warnings."
-                )
-                return
-            
-            parts = message.text.split()
-            if len(parts) < 2:
-                self.bot.reply_to(message,
-                    "📋 <b>VIEW WARNINGS</b>\n\n"
-                    "⚠️ <b>Usage:</b> <code>/viewwarnings [username]</code>\n\n"
-                    "<b>Examples:</b>\n"
-                    "<code>/viewwarnings john_student</code>\n"
-                    "<code>/checkwarnings jane_doe</code>\n\n"
-                    "💡 <b>Note:</b> Username without @ symbol"
-                )
-                return
-            
-            student_username = parts[1].replace("@", "")
-            warnings_info = self.user_manager.get_warnings(student_username)
-            
-            response = f"📋 <b>WARNINGS REPORT</b>\n\n"
-            response += f"👨‍🎓 Student: @{student_username}\n"
-            response += f"📅 Checked on: {datetime.now().strftime('%Y-%m-%d')}\n"
-            response += f"👨‍🏫 Checked by: @{username}\n\n"
-            
-            if not warnings_info or warnings_info['count'] == 0:
-                response += f"✅ <b>NO WARNINGS</b>\n\n"
-                response += f"Student has a clean record."
+            if not today_attendance:
+                response = "📭 No students recorded today."
             else:
-                response += f"⚠️ <b>WARNING STATUS:</b>\n"
-                response += f"• Total Warnings: {warnings_info['count']}/3\n"
+                present = []
+                absent = []
                 
-                if warnings_info['banned']:
-                    response += f"🚫 <b>STATUS: BANNED</b>\n"
-                    response += f"• Ban Reason: {warnings_info['ban_reason']}\n"
-                    response += f"• Banned by: {warnings_info['banned_by']}\n"
-                    response += f"• Banned at: {warnings_info['banned_at']}\n"
-                else:
-                    status = "ACTIVE"
-                    if warnings_info['count'] >= 3:
-                        status = "PENDING BAN"
-                    elif warnings_info['count'] == 2:
-                        status = "HIGH RISK"
-                    elif warnings_info['count'] == 1:
-                        status = "LOW RISK"
-                    response += f"• Status: {status}\n"
-                
-                response += f"\n📋 <b>WARNING HISTORY:</b>\n"
-                for warning in warnings_info['warnings']:
-                    response += f"\n<b>#{warning['id']}:</b>\n"
-                    response += f"• Reason: {warning['reason']}\n"
-                    response += f"• Date: {warning['date']}\n"
-                    response += f"• Time: {warning['time']}\n"
-                    response += f"• Warned by: {warning['warned_by']}\n"
-                
-                response += f"\n💡 <b>QUICK ACTIONS:</b>\n"
-                response += f"<code>/removewarning {student_username} [id]</code> - Remove warning\n"
-                if warnings_info['banned']:
-                    response += f"<code>/unban {student_username}</code> - Unban student\n"
-                else:
-                    response += f"<code>/clearwarnings {student_username}</code> - Clear all warnings\n"
-            
-            self.bot.reply_to(message, response)
-        
-        @self.bot.message_handler(commands=['clearwarnings'])
-        def clear_warnings_handler(message):
-            """Clear all warnings for a student"""
-            user = message.from_user
-            username = user.username
-            
-            # Check permissions - only admins can clear warnings
-            if not self.user_manager.is_admin(username):
-                self.bot.reply_to(message,
-                    "🚫 <b>ACCESS DENIED</b>\n\n"
-                    "Only administrators can clear warnings."
-                )
-                return
-            
-            parts = message.text.split()
-            if len(parts) < 2:
-                self.bot.reply_to(message,
-                    "🔄 <b>CLEAR WARNINGS</b>\n\n"
-                    "⚠️ <b>Usage:</b> <code>/clearwarnings [username]</code>\n\n"
-                    "<b>Examples:</b>\n"
-                    "<code>/clearwarnings john_student</code>\n\n"
-                    "💡 <b>Note:</b>\n"
-                    "• Username without @ symbol\n"
-                    "• This will remove ALL warnings and any active ban"
-                )
-                return
-            
-            student_username = parts[1].replace("@", "")
-            success, result = self.user_manager.clear_warnings(student_username, username)
-            
-            if success:
-                response = (
-                    f"🔄 <b>WARNINGS CLEARED</b>\n\n"
-                    f"👨‍🎓 Student: @{student_username}\n"
-                    f"👨‍💼 Cleared by: @{username}\n"
-                    f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n"
-                    f"🕒 Time: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                    f"✅ All warnings have been removed.\n"
-                    f"✅ Any active ban has been lifted.\n\n"
-                    f"Student's record is now clean."
-                )
-            else:
-                response = result
-            
-            self.bot.reply_to(message, response)
-        
-        @self.bot.message_handler(commands=['removewarning'])
-        def remove_warning_handler(message):
-            """Remove a specific warning"""
-            user = message.from_user
-            username = user.username
-            
-            # Check permissions - only admins can remove warnings
-            if not self.user_manager.is_admin(username):
-                self.bot.reply_to(message,
-                    "🚫 <b>ACCESS DENIED</b>\n\n"
-                    "Only administrators can remove warnings."
-                )
-                return
-            
-            parts = message.text.split()
-            if len(parts) < 3:
-                self.bot.reply_to(message,
-                    "🗑️ <b>REMOVE WARNING</b>\n\n"
-                    "⚠️ <b>Usage:</b> <code>/removewarning [username] [warning_id]</code>\n\n"
-                    "<b>Examples:</b>\n"
-                    "<code>/removewarning john_student 1</code>\n"
-                    "<code>/removewarning jane_doe 2</code>\n\n"
-                    "💡 <b>Note:</b>\n"
-                    "• Username without @ symbol\n"
-                    "• Use /viewwarnings to see warning IDs"
-                )
-                return
-            
-            student_username = parts[1].replace("@", "")
-            warning_id = parts[2]
-            
-            success, result = self.user_manager.remove_warning(student_username, warning_id, username)
-            
-            if success:
-                # Get updated warning info
-                warnings_info = self.user_manager.get_warnings(student_username)
-                
-                response = (
-                    f"🗑️ <b>WARNING REMOVED</b>\n\n"
-                    f"👨‍🎓 Student: @{student_username}\n"
-                    f"👨‍💼 Removed by: @{username}\n"
-                    f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n"
-                    f"🕒 Time: {datetime.now().strftime('%H:%M:%S')}\n"
-                    f"🔢 Warning ID: #{warning_id}\n\n"
-                )
-                
-                if warnings_info:
-                    response += f"📊 <b>UPDATED STATUS:</b>\n"
-                    response += f"• Total Warnings: {warnings_info['count']}/3\n"
+                for user_id, data in today_attendance.items():
+                    # Get display name (use first_name if no username)
+                    username_display = data.get("username", "")
+                    first_name = data.get("first_name", "Unknown")
                     
-                    if warnings_info['banned']:
-                        response += f"🚫 <b>STUDENT IS STILL BANNED</b>\n"
-                        response += f"• Ban Reason: {warnings_info['ban_reason']}\n"
-                    elif warnings_info['count'] >= 2:
-                        response += f"⚠️ <b>ALERT:</b> {3 - warnings_info['count']} more warning(s) will result in ban!\n"
+                    # Handle cases where username is None or empty
+                    if not username_display or username_display == "None" or username_display == "null":
+                        if first_name and first_name != "Unknown":
+                            display_name = f"{first_name} (No username)"
+                        else:
+                            display_name = "Unknown User"
                     else:
-                        response += f"✅ Warning count is now safe.\n"
+                        if username_display.startswith("@"):
+                            display_name = username_display
+                        else:
+                            display_name = f"@{username_display}"
+                    
+                    student_info = {
+                        "display": display_name,
+                        "time": data.get("time", "Unknown"),
+                        "first_name": first_name,
+                        "username": username_display if username_display not in ["None", "null", ""] else "No username"
+                    }
+                    
+                    if data.get("status") == "present":
+                        present.append(student_info)
+                    else:
+                        absent.append(student_info)
+                
+                # Sort present students by time
+                present.sort(key=lambda x: x.get("time", ""))
+                
+                response = (
+                    f"📊 <b>TODAY'S ATTENDANCE REPORT</b>\n"
+                    f"📅 {today}\n\n"
+                    
+                    f"✅ <b>PRESENT ({len(present)}):</b>\n"
+                )
+                
+                # Show present students
+                for i, student in enumerate(present[:20], 1):
+                    time_display = f" - {student['time']}" if student.get('time') and student['time'] != "Unknown" else ""
+                    response += f"{i}. {student['display']}{time_display}\n"
+                
+                if len(present) > 20:
+                    response += f"... and {len(present)-20} more\n"
+                
+                # Show absent students
+                response += f"\n❌ <b>ABSENT ({len(absent)}):</b>\n"
+                
+                if absent:
+                    for i, student in enumerate(absent[:10], 1):
+                        time_display = f" - {student['time']}" if student.get('time') and student['time'] != "Unknown" else ""
+                        response += f"{i}. {student['display']}{time_display}\n"
+                    
+                    if len(absent) > 10:
+                        response += f"... and {len(absent)-10} more\n"
                 else:
-                    response += f"✅ Student has no warnings remaining.\n"
+                    response += "🎉 No absent students today!\n"
+                
+                # Add statistics
+                response += f"\n📈 <b>ATTENDANCE STATISTICS:</b>\n"
+                response += f"• Total Students: {len(present) + len(absent)}\n"
+                response += f"• Present: {len(present)} students\n"
+                response += f"• Absent: {len(absent)} students\n"
+                
+                if (len(present) + len(absent)) > 0:
+                    attendance_rate = (len(present) / (len(present) + len(absent))) * 100
+                    response += f"• Attendance Rate: {attendance_rate:.1f}%\n"
+                
+                response += f"\n⏰ Report generated: {datetime.now().strftime('%H:%M:%S')}"
+            
+            self.bot.reply_to(message, response)
+        
+        # ========== NEW: PRESENT COMMAND ==========
+        @self.bot.message_handler(commands=['present', 'presentlist', 'rollcall'])
+        def present_handler(message):
+            """Show only present students (teachers/admins only)"""
+            username = message.from_user.username
+            
+            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
+                self.bot.reply_to(message,
+                    "🚫 <b>ACCESS DENIED</b>\n\n"
+                    "Only teachers and administrators can view present list."
+                )
+                return
+            
+            # Get today's attendance
+            today = datetime.now().strftime("%Y-%m-%d")
+            today_attendance = self.attendance.get_daily_attendance(today)
+            
+            if not today_attendance:
+                response = "📭 No students recorded today."
             else:
-                response = result
+                present = []
+                
+                for user_id, data in today_attendance.items():
+                    if data.get("status") == "present":
+                        # Get display name (use first_name if no username)
+                        username_display = data.get("username", "")
+                        first_name = data.get("first_name", "Unknown")
+                        
+                        # Handle cases where username is None or empty
+                        if not username_display or username_display == "None" or username_display == "null":
+                            if first_name and first_name != "Unknown":
+                                display_name = f"{first_name}"
+                            else:
+                                display_name = "Unknown User"
+                        else:
+                            if username_display.startswith("@"):
+                                display_name = username_display
+                            else:
+                                display_name = f"@{username_display}"
+                        
+                        student_info = {
+                            "display": display_name,
+                            "time": data.get("time", "Unknown"),
+                            "first_name": first_name,
+                            "username": username_display if username_display not in ["None", "null", ""] else "No username"
+                        }
+                        present.append(student_info)
+                
+                # Sort present students by time
+                present.sort(key=lambda x: x.get("time", ""))
+                
+                if not present:
+                    response = "📭 No students are marked present today."
+                else:
+                    response = (
+                        f"✅ <b>ROLL CALL - PRESENT STUDENTS</b>\n"
+                        f"📅 {today}\n\n"
+                        
+                        f"👥 <b>Total Present: {len(present)} students</b>\n\n"
+                    )
+                    
+                    # Group by time (morning, afternoon, etc.)
+                    morning = []
+                    afternoon = []
+                    evening = []
+                    
+                    for student in present:
+                        time_str = student.get("time", "00:00:00")
+                        try:
+                            hour = int(time_str.split(":")[0])
+                            if hour < 12:
+                                morning.append(student)
+                            elif hour < 17:
+                                afternoon.append(student)
+                            else:
+                                evening.append(student)
+                        except:
+                            morning.append(student)  # Default to morning if time parsing fails
+                    
+                    # Show by time period
+                    if morning:
+                        response += f"🌅 <b>Morning ({len(morning)}):</b>\n"
+                        for i, student in enumerate(morning[:15], 1):
+                            response += f"{i}. {student['display']} - {student['time']}\n"
+                        if len(morning) > 15:
+                            response += f"... and {len(morning)-15} more\n"
+                        response += "\n"
+                    
+                    if afternoon:
+                        response += f"☀️ <b>Afternoon ({len(afternoon)}):</b>\n"
+                        for i, student in enumerate(afternoon[:10], 1):
+                            response += f"{i}. {student['display']} - {student['time']}\n"
+                        if len(afternoon) > 10:
+                            response += f"... and {len(afternoon)-10} more\n"
+                        response += "\n"
+                    
+                    if evening:
+                        response += f"🌙 <b>Evening ({len(evening)}):</b>\n"
+                        for i, student in enumerate(evening[:5], 1):
+                            response += f"{i}. {student['display']} - {student['time']}\n"
+                        if len(evening) > 5:
+                            response += f"... and {len(evening)-5} more\n"
+                        response += "\n"
+                    
+                    # Quick statistics
+                    response += f"📊 <b>QUICK STATS:</b>\n"
+                    response += f"• First to arrive: {present[0]['display']} at {present[0]['time']}\n"
+                    if len(present) > 1:
+                        response += f"• Last to arrive: {present[-1]['display']} at {present[-1]['time']}\n"
+                    
+                    response += f"\n⏰ Report generated: {datetime.now().strftime('%H:%M:%S')}"
             
             self.bot.reply_to(message, response)
-
-        # ========== BAN SYSTEM COMMANDS ==========
         
-        @self.bot.message_handler(commands=['ban'])
-        def ban_handler(message):
-            """Ban a student immediately"""
-            user = message.from_user
-            username = user.username
+        # ========== ADMIN MANAGEMENT COMMANDS ==========
+        @self.bot.message_handler(commands=['addadmin'])
+        def add_admin_handler(message):
+            """Add new admin (super admins only)"""
+            username = message.from_user.username
             
-            # Check permissions - only admins can ban
-            if not self.user_manager.is_admin(username):
+            if not self.user_manager.is_super_admin(username):
                 self.bot.reply_to(message,
                     "🚫 <b>ACCESS DENIED</b>\n\n"
-                    "Only administrators can ban students."
-                )
-                return
-            
-            parts = message.text.split()
-            if len(parts) < 3:
-                self.bot.reply_to(message,
-                    "🚫 <b>BAN STUDENT</b>\n\n"
-                    "⚠️ <b>Usage:</b> <code>/ban [username] [reason]</code>\n\n"
-                    "<b>Examples:</b>\n"
-                    "<code>/ban john_student Repeated violations</code>\n"
-                    "<code>/ban jane_doe Severe misconduct</code>\n"
-                    "<code>/ban student123 Academic dishonesty</code>\n\n"
-                    "💡 <b>Note:</b>\n"
-                    "• Username without @ symbol\n"
-                    "• Student will be immediately blocked from bot\n"
-                    "• Use /unban to remove ban"
-                )
-                return
-            
-            student_username = parts[1].replace("@", "")
-            reason = " ".join(parts[2:])
-            
-            # Check if trying to ban admin/teacher
-            if (self.user_manager.is_admin(student_username) or 
-                self.user_manager.is_teacher(student_username) or
-                self.user_manager.is_super_admin(student_username)):
-                self.bot.reply_to(message,
-                    "🚫 <b>CANNOT BAN ADMIN/TEACHER</b>\n\n"
-                    "You cannot ban administrators or teachers.\n"
-                    "Remove them from their role first."
-                )
-                return
-            
-            # Ban the user
-            success, result = self.user_manager.ban_user(student_username, reason, username)
-            
-            response = (
-                f"🚫 <b>STUDENT BANNED</b>\n\n"
-                f"👨‍🎓 Student: @{student_username}\n"
-                f"👨‍💼 Banned by: @{username}\n"
-                f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n"
-                f"🕒 Time: {datetime.now().strftime('%H:%M:%S')}\n"
-                f"📝 Reason: {reason}\n\n"
-                f"🔒 <b>EFFECTS:</b>\n"
-                f"• Cannot use /profile or /start\n"
-                f"• Cannot submit assignments\n"
-                f"• Cannot check attendance\n"
-                f"• All bot access blocked\n\n"
-                f"💡 <b>To unban:</b>\n"
-                f"<code>/unban {student_username}</code>"
-            )
-            
-            self.bot.reply_to(message, response)
-        
-        @self.bot.message_handler(commands=['unban'])
-        def unban_handler(message):
-            """Unban a student"""
-            user = message.from_user
-            username = user.username
-            
-            # Check permissions - only admins can unban
-            if not self.user_manager.is_admin(username):
-                self.bot.reply_to(message,
-                    "🚫 <b>ACCESS DENIED</b>\n\n"
-                    "Only administrators can unban students."
+                    "Only super admins can add new administrators."
                 )
                 return
             
             parts = message.text.split()
             if len(parts) < 2:
                 self.bot.reply_to(message,
-                    "🔓 <b>UNBAN STUDENT</b>\n\n"
-                    "⚠️ <b>Usage:</b> <code>/unban [username]</code>\n\n"
-                    "<b>Examples:</b>\n"
-                    "<code>/unban john_student</code>\n"
-                    "<code>/unban jane_doe</code>\n\n"
+                    "👑 <b>ADD ADMINISTRATOR</b>\n\n"
+                    "⚠️ <b>Usage:</b> <code>/addadmin [username]</code>\n\n"
+                    "<b>Example:</b>\n"
+                    "<code>/addadmin john_doe</code>\n\n"
                     "💡 <b>Note:</b> Username without @ symbol"
                 )
                 return
             
-            student_username = parts[1].replace("@", "")
-            success, result = self.user_manager.unban_user(student_username, username)
-            
-            if success:
+            new_admin = parts[1]
+            if self.user_manager.add_admin(new_admin):
                 response = (
-                    f"🔓 <b>STUDENT UNBANNED</b>\n\n"
-                    f"👨‍🎓 Student: @{student_username}\n"
-                    f"👨‍💼 Unbanned by: @{username}\n"
-                    f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n"
-                    f"🕒 Time: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                    f"✅ <b>ACCESS RESTORED:</b>\n"
-                    f"• Can use /profile again\n"
-                    f"• Can submit assignments\n"
-                    f"• Can check attendance\n"
-                    f"• Full bot access restored\n\n"
-                    f"⚠️ <b>Note:</b> Warnings are still on record\n"
-                    f"Use /clearwarnings to remove all warnings"
+                    f"✅ <b>NEW ADMIN ADDED</b>\n\n"
+                    f"👨‍💼 Username: @{new_admin}\n"
+                    f"👑 Added by: @{username}\n"
+                    f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+                    f"Total Admins: {len(self.user_manager.admins)}"
                 )
             else:
-                response = result
+                response = f"⚠️ @{new_admin} is already an administrator."
             
             self.bot.reply_to(message, response)
         
-        @self.bot.message_handler(commands=['bannedlist', 'bannedstudents'])
-        def banned_list_handler(message):
-            """List all banned students"""
-            user = message.from_user
-            username = user.username
+        @self.bot.message_handler(commands=['removeadmin'])
+        def remove_admin_handler(message):
+            """Remove admin (super admins only)"""
+            username = message.from_user.username
             
-            # Check permissions - only admins
-            if not self.user_manager.is_admin(username):
+            if not self.user_manager.is_super_admin(username):
                 self.bot.reply_to(message,
                     "🚫 <b>ACCESS DENIED</b>\n\n"
-                    "Only administrators can view banned list."
+                    "Only super admins can remove administrators."
                 )
                 return
             
-            # Find all banned students
-            banned_students = []
-            for student_username, warnings_info in self.user_manager.warnings.items():
-                if warnings_info.get('banned', False):
-                    banned_students.append({
-                        'username': student_username,
-                        'ban_reason': warnings_info.get('ban_reason', 'No reason'),
-                        'banned_by': warnings_info.get('banned_by', 'Unknown'),
-                        'banned_at': warnings_info.get('banned_at', 'Unknown'),
-                        'warning_count': warnings_info.get('count', 0)
-                    })
-            
-            if not banned_students:
+            parts = message.text.split()
+            if len(parts) < 2:
                 self.bot.reply_to(message,
-                    "✅ <b>NO BANNED STUDENTS</b>\n\n"
-                    "There are currently no banned students."
+                    "👑 <b>REMOVE ADMINISTRATOR</b>\n\n"
+                    "⚠️ <b>Usage:</b> <code>/removeadmin [username]</code>\n\n"
+                    "<b>Example:</b>\n"
+                    "<code>/removeadmin john_doe</code>"
                 )
                 return
             
-            response = f"🚫 <b>BANNED STUDENTS LIST</b>\n\n"
-            response += f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n"
-            response += f"📊 Total Banned: {len(banned_students)}\n\n"
-            
-            for i, student in enumerate(banned_students, 1):
-                response += f"<b>{i}. @{student['username']}</b>\n"
-                response += f"• Reason: {student['ban_reason'][:50]}...\n"
-                response += f"• Banned by: {student['banned_by']}\n"
-                response += f"• Date: {student['banned_at']}\n"
-                response += f"• Warnings: {student['warning_count']}/3\n\n"
-            
-            response += f"💡 <b>QUICK ACTIONS:</b>\n"
-            for student in banned_students[:3]:  # Show first 3
-                response += f"<code>/unban {student['username']}</code>\n"
-            
-            if len(banned_students) > 3:
-                response += f"... and {len(banned_students) - 3} more\n"
+            admin_to_remove = parts[1]
+            if self.user_manager.remove_admin(admin_to_remove):
+                response = (
+                    f"✅ <b>ADMIN REMOVED</b>\n\n"
+                    f"👨‍💼 Username: @{admin_to_remove}\n"
+                    f"👑 Removed by: @{username}\n"
+                    f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+                    f"Remaining Admins: {len(self.user_manager.admins)}"
+                )
+            else:
+                response = f"⚠️ Cannot remove @{admin_to_remove}. They might be a super admin or not in the list."
             
             self.bot.reply_to(message, response)
-
-        # ========== ASSIGNMENT SYSTEM COMMANDS ==========
         
-        @self.bot.message_handler(commands=['assign', 'createassignment'])
-        def assign_handler(message):
-            """Create a new assignment"""
-            user = message.from_user
-            username = user.username
+        @self.bot.message_handler(commands=['addteacher'])
+        def add_teacher_handler(message):
+            """Add new teacher (admins only)"""
+            username = message.from_user.username
+            
+            if not (self.user_manager.is_admin(username) or self.user_manager.is_super_admin(username)):
+                self.bot.reply_to(message,
+                    "🚫 <b>ACCESS DENIED</b>\n\n"
+                    "Only administrators can add new teachers."
+                )
+                return
+            
+            parts = message.text.split()
+            if len(parts) < 2:
+                self.bot.reply_to(message,
+                    "👨‍🏫 <b>ADD TEACHER</b>\n\n"
+                    "⚠️ <b>Usage:</b> <code>/addteacher [username]</code>\n\n"
+                    "<b>Example:</b>\n"
+                    "<code>/addteacher math_teacher</code>\n\n"
+                    "💡 <b>Note:</b> Username without @ symbol"
+                )
+                return
+            
+            new_teacher = parts[1]
+            if self.user_manager.add_teacher(new_teacher):
+                response = (
+                    f"✅ <b>NEW TEACHER ADDED</b>\n\n"
+                    f"👨‍🏫 Username: @{new_teacher}\n"
+                    f"👑 Added by: @{username}\n"
+                    f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+                    f"Total Teachers: {len(self.user_manager.teachers)}"
+                )
+            else:
+                response = f"⚠️ @{new_teacher} is already a teacher."
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['removeteacher'])
+        def remove_teacher_handler(message):
+            """Remove teacher (admins only)"""
+            username = message.from_user.username
+            
+            if not (self.user_manager.is_admin(username) or self.user_manager.is_super_admin(username)):
+                self.bot.reply_to(message,
+                    "🚫 <b>ACCESS DENIED</b>\n\n"
+                    "Only administrators can remove teachers."
+                )
+                return
+            
+            parts = message.text.split()
+            if len(parts) < 2:
+                self.bot.reply_to(message,
+                    "👨‍🏫 <b>REMOVE TEACHER</b>\n\n"
+                    "⚠️ <b>Usage:</b> <code>/removeteacher [username]</code>\n\n"
+                    "<b>Example:</b>\n"
+                    "<code>/removeteacher math_teacher</code>"
+                )
+                return
+            
+            teacher_to_remove = parts[1]
+            if self.user_manager.remove_teacher(teacher_to_remove):
+                response = (
+                    f"✅ <b>TEACHER REMOVED</b>\n\n"
+                    f"👨‍🏫 Username: @{teacher_to_remove}\n"
+                    f"👑 Removed by: @{username}\n"
+                    f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+                    f"Remaining Teachers: {len(self.user_manager.teachers)}"
+                )
+            else:
+                response = f"⚠️ @{teacher_to_remove} is not in the teacher list."
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['listadmins'])
+        def list_admins_handler(message):
+            """List all admins"""
+            username = message.from_user.username
+            
+            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
+                self.bot.reply_to(message,
+                    "🚫 <b>ACCESS DENIED</b>\n\n"
+                    "Only administrators and teachers can view this list."
+                )
+                return
+            
+            admins = self.user_manager.get_all_admins()
+            
+            response = f"👑 <b>SYSTEM ADMINISTRATORS</b>\n\n"
+            
+            for i, admin in enumerate(admins, 1):
+                status = "SUPER ADMIN" if self.user_manager.is_super_admin(admin) else "ADMIN"
+                response += f"{i}. @{admin} - {status}\n"
+            
+            response += f"\n📊 Total: {len(admins)} administrators"
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['listteachers'])
+        def list_teachers_handler(message):
+            """List all teachers"""
+            username = message.from_user.username
+            
+            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
+                self.bot.reply_to(message,
+                    "🚫 <b>ACCESS DENIED</b>\n\n"
+                    "Only administrators and teachers can view this list."
+                )
+                return
+            
+            teachers = self.user_manager.get_all_teachers()
+            
+            response = f"👨‍🏫 <b>TEACHERS LIST</b>\n\n"
+            
+            for i, teacher in enumerate(teachers, 1):
+                response += f"{i}. @{teacher}\n"
+            
+            response += f"\n📊 Total: {len(teachers)} teachers"
+            
+            self.bot.reply_to(message, response)
+        
+        # ========== ASSIGNMENT COMMANDS ==========
+        @self.bot.message_handler(commands=['createassignment', 'newassignment'])
+        def create_assignment_handler(message):
+            """Create new assignment (teachers only)"""
+            username = message.from_user.username
             
             if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
                 self.bot.reply_to(message,
@@ -520,224 +1180,665 @@
                 )
                 return
             
-            parts = message.text.split()
-            if len(parts) < 4:
+            parts = message.text.split(maxsplit=4)
+            if len(parts) < 5:
                 self.bot.reply_to(message,
-                    "📚 <b>CREATE ASSIGNMENT</b>\n\n"
-                    "⚠️ <b>Usage:</b> <code>/assign [subject] [title] [description]</code>\n\n"
+                    "📝 <b>CREATE ASSIGNMENT</b>\n\n"
+                    "⚠️ <b>Usage:</b> <code>/createassignment [subject] [title] [due_date] [description]</code>\n\n"
                     "<b>Example:</b>\n"
-                    "<code>/assign Math \"Algebra Homework\" \"Complete exercises 1-10 on page 45\"</code>\n\n"
-                    "💡 <b>Note:</b>\n"
-                    "• Subject: Math, Science, English, etc.\n"
-                    "• Title in quotes for multi-word titles\n"
-                    "• Due date will be set to 7 days from now"
+                    "<code>/createassignment Mathematics Algebra 2024-02-10 Solve equations 1-10 from textbook</code>\n\n"
+                    "<b>Date format:</b> YYYY-MM-DD (e.g., 2024-02-10)"
                 )
                 return
             
             subject = parts[1]
-            title = parts[2].replace('"', '') if parts[2].startswith('"') else parts[2]
-            description = " ".join(parts[3:])
+            title = parts[2]
+            due_date_str = parts[3]
+            description = parts[4]
             
-            # Set due date to 7 days from now
-            due_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+            # Parse due date
+            try:
+                due_date = datetime.strptime(due_date_str, "%Y-%m-%d")
+                due_date = due_date.replace(hour=23, minute=59, second=59)
+            except ValueError:
+                self.bot.reply_to(message,
+                    "❌ <b>INVALID DATE FORMAT</b>\n\n"
+                    "Please use YYYY-MM-DD format\n"
+                    "Example: 2024-02-10"
+                )
+                return
             
             # Create assignment
             assignment_id, assignment = self.assignments.create_assignment(
-                user.id,
+                message.from_user.id,
                 username,
                 subject,
                 title,
                 description,
-                due_date
+                due_date.strftime("%Y-%m-%d %H:%M:%S")
             )
             
             response = (
                 f"📚 <b>NEW ASSIGNMENT CREATED</b>\n\n"
-                f"📝 <b>DETAILS:</b>\n"
-                f"• ID: <code>{assignment_id}</code>\n"
-                f"• Subject: {subject}\n"
-                f"• Title: {title}\n"
-                f"• Description: {description}\n"
-                f"• Due Date: {due_date}\n"
-                f"• Created by: @{username}\n\n"
-                f"👨‍🎓 <b>FOR STUDENTS:</b>\n"
-                f"• Use <code>/receive {assignment_id}</code> to receive assignment\n"
-                f"• Use <code>/submit {assignment_id} [your_work]</code> to submit\n\n"
-                f"👨‍🏫 <b>FOR TEACHERS:</b>\n"
-                f"• Use <code>/inbox</code> to view submissions\n"
-                f"• Use <code>/grade {assignment_id} [student_id] [grade]</code> to grade"
+                f"📝 <b>Title:</b> {title}\n"
+                f"📚 <b>Subject:</b> {subject}\n"
+                f"👨‍🏫 <b>Teacher:</b> @{username}\n"
+                f"📅 <b>Due Date:</b> {due_date_str}\n"
+                f"📋 <b>Description:</b>\n{description}\n\n"
+                f"🆔 <b>Assignment ID:</b> <code>{assignment_id}</code>\n\n"
+                f"👨‍🎓 <b>STUDENTS:</b> Use <code>/receive {assignment_id}</code> to receive this assignment\n"
+                f"👨‍🏫 <b>TEACHERS:</b> Use <code>/assignmentstats {assignment_id}</code> to view statistics"
             )
             
             self.bot.reply_to(message, response)
-
-        # ========== HELPER METHODS ==========
-    
-    def _get_admin_help(self, username):
-        """Get help for admins"""
-        response = (
-            f"👑 <b>ADMIN COMMANDS</b>\n"
-            f"🏫 {SCHOOL_NAME} - {GRADE}\n\n"
+        
+        @self.bot.message_handler(commands=['assignments', 'myassignments'])
+        def assignments_handler(message):
+            """View student assignments"""
+            user = message.from_user
+            student_assignments = self.assignments.get_student_assignments(user.id)
             
-            f"📊 <b>USER MANAGEMENT:</b>\n"
-            f"<code>/addadmin [username]</code> - Add admin\n"
-            f"<code>/removeadmin [username]</code> - Remove admin\n"
-            f"<code>/addteacher [username]</code> - Add teacher\n"
-            f"<code>/removeteacher [username]</code> - Remove teacher\n"
+            if not student_assignments:
+                response = (
+                    f"📚 <b>MY ASSIGNMENTS</b>\n\n"
+                    f"📭 No assignments found.\n\n"
+                    f"💡 <b>How it works:</b>\n"
+                    f"1. Teachers create assignments\n"
+                    f"2. Use <code>/receive [id]</code> to receive\n"
+                    f"3. Use <code>/submit [id] [work]</code> to submit\n"
+                    f"4. Check grades with <code>/grades</code>"
+                )
+            else:
+                response = f"📚 <b>MY ASSIGNMENTS</b>\n\n"
+                
+                # Group by status
+                pending = [a for a in student_assignments if not a.get("submitted")]
+                submitted = [a for a in student_assignments if a.get("submitted") and not a.get("graded")]
+                graded = [a for a in student_assignments if a.get("graded")]
+                
+                if pending:
+                    response += f"⏳ <b>PENDING ({len(pending)}):</b>\n"
+                    for assignment in pending[:3]:
+                        response += f"• {assignment['title']} (Due: {assignment['due_date'][:10]})\n"
+                        response += f"  ID: <code>{assignment['assignment_id']}</code>\n"
+                    if len(pending) > 3:
+                        response += f"  ... and {len(pending)-3} more\n"
+                    response += "\n"
+                
+                if submitted:
+                    response += f"📤 <b>SUBMITTED ({len(submitted)}):</b>\n"
+                    for assignment in submitted[:2]:
+                        response += f"• {assignment['title']} (Submitted: {assignment['submission_time'][:10]})\n"
+                    response += "\n"
+                
+                if graded:
+                    response += f"📝 <b>GRADED ({len(graded)}):</b>\n"
+                    for assignment in graded[:3]:
+                        grade = assignment.get('grade', 'N/A')
+                        response += f"• {assignment['title']}: {grade}\n"
+                    response += "\n"
+                
+                response += (
+                    f"📊 <b>QUICK ACTIONS:</b>\n"
+                    f"<code>/receive [id]</code> - Receive an assignment\n"
+                    f"<code>/submit [id] [work]</code> - Submit assignment\n"
+                    f"<code>/grades</code> - View all grades\n"
+                )
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['receive'])
+        def receive_handler(message):
+            """Student receives an assignment"""
+            user = message.from_user
+            
+            parts = message.text.split()
+            if len(parts) < 2:
+                self.bot.reply_to(message,
+                    "📥 <b>RECEIVE ASSIGNMENT</b>\n\n"
+                    "⚠️ <b>Usage:</b> <code>/receive [assignment_id]</code>\n\n"
+                    "<b>Example:</b>\n"
+                    "<code>/receive 1234567890</code>\n\n"
+                    "💡 <b>Find assignment IDs in /assignments</b>"
+                )
+                return
+            
+            assignment_id = parts[1]
+            success, result = self.assignments.receive_assignment(
+                user.id,
+                user.username,
+                assignment_id
+            )
+            
+            if success:
+                assignment = self.assignments.get_assignment_by_id(assignment_id)
+                response = (
+                    f"📥 <b>ASSIGNMENT RECEIVED</b>\n\n"
+                    f"{result}\n\n"
+                    f"📝 <b>Details:</b>\n"
+                    f"• Title: {assignment['title']}\n"
+                    f"• Subject: {assignment['subject']}\n"
+                    f"• Due Date: {assignment['due_date'][:10]}\n"
+                    f"• Teacher: @{assignment['teacher_username']}\n\n"
+                    f"📋 <b>Next Step:</b> Complete and submit using:\n"
+                    f"<code>/submit {assignment_id} [your work]</code>\n\n"
+                    f"💡 <b>Example:</b>\n"
+                    f"<code>/submit {assignment_id} I have completed all questions</code>"
+                )
+            else:
+                response = result
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['submit', 'finished'])
+        def submit_handler(message):
+            """Student submits an assignment"""
+            user = message.from_user
+            
+            parts = message.text.split(maxsplit=2)
+            if len(parts) < 3:
+                self.bot.reply_to(message,
+                    "📤 <b>SUBMIT ASSIGNMENT</b>\n\n"
+                    "⚠️ <b>Usage:</b> <code>/submit [assignment_id] [your work]</code>\n\n"
+                    "<b>Example:</b>\n"
+                    "<code>/submit 1234567890 I have completed all problems from chapter 5</code>\n\n"
+                    "💡 <b>Notes:</b>\n"
+                    "• First receive assignment with /receive\n"
+                    "• Describe your work clearly\n"
+                    "• Submit before due date"
+                )
+                return
+            
+            assignment_id = parts[1]
+            submission_text = parts[2]
+            
+            success, result = self.assignments.submit_assignment(
+                user.id,
+                user.username,
+                assignment_id,
+                submission_text
+            )
+            
+            if success:
+                assignment = self.assignments.get_assignment_by_id(assignment_id)
+                
+                # Check if late
+                due_date = datetime.strptime(assignment["due_date"], "%Y-%m-%d %H:%M:%S")
+                submit_date = datetime.now()
+                
+                if submit_date > due_date:
+                    days_late = (submit_date - due_date).days
+                    late_note = f"⏰ <b>LATE SUBMISSION:</b> {days_late} days late\n\n"
+                else:
+                    late_note = "✅ <b>ON TIME SUBMISSION</b>\n\n"
+                
+                response = (
+                    f"📤 <b>ASSIGNMENT SUBMITTED</b>\n\n"
+                    f"{late_note}"
+                    f"{result}\n\n"
+                    f"📝 <b>Details:</b>\n"
+                    f"• Student: {user.first_name} (@{user.username})\n"
+                    f"• Assignment: {assignment['title']}\n"
+                    f"• Subject: {assignment['subject']}\n"
+                    f"• Submission: {submission_text[:100]}...\n"
+                    f"• Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    f"👨‍🏫 <b>Submitted to:</b> @{assignment['teacher_username']}\n"
+                    f"📬 Teacher will grade and provide feedback\n\n"
+                    f"📊 <b>Check grades with:</b> <code>/grades</code>"
+                )
+            else:
+                response = result
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['inbox', 'mysubmissions'])
+        def inbox_handler(message):
+            """Teacher views submission inbox"""
+            username = message.from_user.username
+            
+            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
+                self.bot.reply_to(message,
+                    "🚫 <b>ACCESS DENIED</b>\n\n"
+                    "Only teachers and administrators can view submissions inbox."
+                )
+                return
+            
+            teacher_submissions = self.assignments.get_teacher_inbox(message.from_user.id)
+            
+            if not teacher_submissions:
+                response = (
+                    f"📬 <b>TEACHER INBOX</b>\n\n"
+                    f"📭 No submissions yet.\n\n"
+                    f"💡 <b>How it works:</b>\n"
+                    f"1. Create assignments with /createassignment\n"
+                    f"2. Students submit with /submit\n"
+                    f"3. View and grade submissions here\n"
+                    f"4. Provide feedback to students"
+                )
+            else:
+                # Group by status
+                pending = [s for s in teacher_submissions if s["status"] == "submitted" and not s["graded"]]
+                graded = [s for s in teacher_submissions if s["graded"]]
+                received = [s for s in teacher_submissions if s["status"] == "received"]
+                
+                response = f"📬 <b>TEACHER INBOX</b>\n👨‍🏫 @{username}\n\n"
+                
+                if pending:
+                    response += f"⏳ <b>PENDING GRADING ({len(pending)}):</b>\n"
+                    for sub in pending[:3]:
+                        response += f"• {sub['student_username']}: {sub['assignment_title']}\n"
+                        response += f"  ID: <code>{sub['assignment_id']}_{sub['student_id']}</code>\n"
+                    if len(pending) > 3:
+                        response += f"  ... and {len(pending)-3} more\n"
+                    response += "\n"
+                
+                if graded:
+                    response += f"✅ <b>GRADED ({len(graded)}):</b>\n"
+                    for sub in graded[:2]:
+                        response += f"• {sub['student_username']}: {sub['assignment_title']} - {sub.get('grade', 'N/A')}\n"
+                    response += "\n"
+                
+                if received:
+                    response += f"📥 <b>RECEIVED ({len(received)}):</b>\n"
+                    response += f"{len(received)} students received assignments\n\n"
+                
+                response += (
+                    f"📝 <b>GRADE A SUBMISSION:</b>\n"
+                    f"<code>/grade [assignment_id] [student_id] [grade] [feedback]</code>\n\n"
+                    f"<b>Example:</b>\n"
+                    f"<code>/grade 1234567890 987654321 85 Good work!</code>\n\n"
+                    f"📊 <b>View assignment statistics:</b>\n"
+                    f"<code>/assignmentstats [assignment_id]</code>"
+                )
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['grade'])
+        def grade_handler(message):
+            """Teacher grades a submission"""
+            username = message.from_user.username
+            
+            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
+                self.bot.reply_to(message,
+                    "🚫 <b>ACCESS DENIED</b>\n\n"
+                    "Only teachers and administrators can grade submissions."
+                )
+                return
+            
+            parts = message.text.split(maxsplit=4)
+            if len(parts) < 4:
+                self.bot.reply_to(message,
+                    "📝 <b>GRADE SUBMISSION</b>\n\n"
+                    "⚠️ <b>Usage:</b> <code>/grade [assignment_id] [student_id] [grade] [feedback]</code>\n\n"
+                    "<b>Example:</b>\n"
+                    "<code>/grade 1234567890 987654321 85 Excellent work!</code>\n\n"
+                    "💡 <b>Note:</b> Feedback is optional"
+                )
+                return
+            
+            assignment_id = parts[1]
+            student_id = parts[2]
+            grade = parts[3]
+            feedback = parts[4] if len(parts) > 4 else ""
+            
+            success, result = self.assignments.grade_submission(
+                username,
+                assignment_id,
+                student_id,
+                grade,
+                feedback
+            )
+            
+            if success:
+                # Get student info
+                student_submissions = self.assignments.get_teacher_inbox(message.from_user.id)
+                student_info = None
+                for sub in student_submissions:
+                    if sub["student_id"] == student_id and sub["assignment_id"] == assignment_id:
+                        student_info = sub
+                        break
+                
+                response = (
+                    f"📝 <b>GRADE RECORDED</b>\n\n"
+                    f"✅ {result}\n\n"
+                    f"📊 <b>Details:</b>\n"
+                )
+                
+                if student_info:
+                    response += f"• Student: @{student_info['student_username']}\n"
+                    response += f"• Assignment: {student_info['assignment_title']}\n"
+                
+                response += f"• Grade: {grade}\n"
+                
+                if feedback:
+                    response += f"• Feedback: {feedback}\n"
+                
+                response += f"• Graded by: @{username}\n"
+                response += f"• Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            else:
+                response = result
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['grades'])
+        def grades_handler(message):
+            """View student grades"""
+            user = message.from_user
+            student_grades = self.assignments.get_student_grades(user.id)
+            
+            if not student_grades:
+                response = (
+                    f"📝 <b>MY GRADES</b>\n\n"
+                    f"📭 No grades recorded yet.\n\n"
+                    f"💡 <b>How it works:</b>\n"
+                    f"1. Submit assignments using /submit\n"
+                    f"2. Teachers grade your work\n"
+                    f"3. Grades appear here with feedback\n\n"
+                    f"📊 <b>Current Status:</b>\n"
+                    f"• Check assignments: <code>/assignments</code>\n"
+                    f"• Submit work: <code>/submit</code>"
+                )
+            else:
+                # Calculate average grade
+                total_grade = 0
+                valid_grades = 0
+                
+                for grade_entry in student_grades:
+                    try:
+                        grade_value = float(grade_entry["grade"])
+                        total_grade += grade_value
+                        valid_grades += 1
+                    except:
+                        pass
+                
+                average_grade = total_grade / valid_grades if valid_grades > 0 else 0
+                
+                response = (
+                    f"📝 <b>ACADEMIC RECORD</b>\n"
+                    f"👤 {user.first_name} (@{user.username or 'No username'})\n\n"
+                    
+                    f"📊 <b>OVERALL PERFORMANCE:</b>\n"
+                    f"• Total Assignments: {len(student_grades)}\n"
+                    f"• Average Grade: {average_grade:.1f}\n\n"
+                    
+                    f"📋 <b>GRADE BREAKDOWN:</b>\n"
+                )
+                
+                for grade_entry in student_grades[:5]:
+                    grade_value = grade_entry.get("grade", "N/A")
+                    response += f"📚 {grade_entry['assignment_title']}: {grade_value}\n"
+                    if grade_entry.get("feedback"):
+                        response += f"   💬 {grade_entry['feedback'][:50]}...\n"
+                
+                if len(student_grades) > 5:
+                    response += f"\n📖 ... and {len(student_grades) - 5} more assignments\n"
+                
+                response += f"\n📅 Last updated: {datetime.now().strftime('%Y-%m-%d')}"
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['assignmentstats'])
+        def assignment_stats_handler(message):
+            """View assignment statistics"""
+            username = message.from_user.username
+            
+            if not (self.user_manager.is_admin(username) or self.user_manager.is_teacher(username)):
+                self.bot.reply_to(message,
+                    "🚫 <b>ACCESS DENIED</b>\n\n"
+                    "Only teachers and administrators can view assignment statistics."
+                )
+                return
+            
+            parts = message.text.split()
+            if len(parts) < 2:
+                self.bot.reply_to(message,
+                    "📊 <b>ASSIGNMENT STATISTICS</b>\n\n"
+                    "⚠️ <b>Usage:</b> <code>/assignmentstats [assignment_id]</code>\n\n"
+                    "<b>Example:</b>\n"
+                    "<code>/assignmentstats 1234567890</code>\n\n"
+                    "💡 <b>Get assignment IDs from your created assignments</b>"
+                )
+                return
+            
+            assignment_id = parts[1]
+            stats = self.assignments.get_assignment_stats(assignment_id)
+            
+            if not stats:
+                response = "❌ Assignment not found or no statistics available."
+            else:
+                assignment = self.assignments.get_assignment_by_id(assignment_id)
+                
+                response = (
+                    f"📊 <b>ASSIGNMENT STATISTICS</b>\n\n"
+                    f"📝 <b>Title:</b> {assignment['title']}\n"
+                    f"📚 <b>Subject:</b> {assignment['subject']}\n"
+                    f"👨‍🏫 <b>Teacher:</b> @{assignment['teacher_username']}\n"
+                    f"📅 <b>Due Date:</b> {assignment['due_date'][:10]}\n\n"
+                    
+                    f"📈 <b>PERFORMANCE METRICS:</b>\n"
+                    f"• Total Students: {stats['total_students']}\n"
+                    f"• Submitted: {stats['submitted']}\n"
+                    f"• Graded: {stats['graded']}\n"
+                    f"• Submission Rate: {stats['submission_rate']}%\n"
+                    f"• Late Submissions: {stats['late_submissions']}\n"
+                    f"• Average Grade: {stats['average_grade']}\n\n"
+                )
+                
+                if stats['total_students'] > 0:
+                    pending = stats['total_students'] - stats['submitted']
+                    response += f"⏳ <b>Pending Submissions:</b> {pending}\n"
+                
+                response += f"\n🆔 Assignment ID: <code>{assignment_id}</code>"
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(commands=['status'])
+        def status_handler(message):
+            """View bot status"""
+            user = message.from_user
+            username = user.username
+            
+            # Count data
+            total_assignments = len(self.assignments.assignments)
+            active_assignments = len(self.assignments.get_active_assignments())
+            total_submissions = len(self.assignments.submissions)
+            
+            # Today's attendance
+            today = datetime.now().strftime("%Y-%m-%d")
+            today_attendance = self.attendance.get_daily_attendance(today)
+            
+            response = (
+                f"📊 <b>SYSTEM STATUS</b>\n"
+                f"🏫 {SCHOOL_NAME} - {GRADE}\n\n"
+                
+                f"👥 <b>USER STATISTICS:</b>\n"
+                f"• Administrators: {len(self.user_manager.admins)}\n"
+                f"• Teachers: {len(self.user_manager.teachers)}\n\n"
+                
+                f"📚 <b>ACADEMIC STATISTICS:</b>\n"
+                f"• Total Assignments: {total_assignments}\n"
+                f"• Active Assignments: {active_assignments}\n"
+                f"• Total Submissions: {total_submissions}\n\n"
+                
+                f"📅 <b>TODAY'S ATTENDANCE:</b>\n"
+                f"• Date: {today}\n"
+                f"• Present Today: {len([x for x in today_attendance.values() if x['status'] == 'present'])}\n"
+                f"• Absent Today: {len([x for x in today_attendance.values() if x['status'] == 'absent'])}\n\n"
+                
+                f"👤 <b>YOUR ROLE:</b>\n"
+            )
+            
+            if self.user_manager.is_super_admin(username):
+                response += f"• 👑 SUPER ADMINISTRATOR\n"
+            elif self.user_manager.is_admin(username):
+                response += f"• 👨‍💼 ADMINISTRATOR\n"
+            elif self.user_manager.is_teacher(username):
+                response += f"• 👨‍🏫 TEACHER\n"
+            else:
+                response += f"• 👨‍🎓 STUDENT\n"
+            
+            response += f"\n🕒 Last updated: {datetime.now().strftime('%H:%M:%S')}"
+            
+            self.bot.reply_to(message, response)
+        
+        @self.bot.message_handler(func=lambda message: True)
+        def handle_all_messages(message):
+            """Handle all other messages"""
+            if message.text.lower() in ['hi', 'hello', 'hey']:
+                self.bot.reply_to(message,
+                    f"👋 Hello {message.from_user.first_name}!\n"
+                    f"Welcome to {SCHOOL_NAME} {GRADE}.\n\n"
+                    f"Type /help to see available commands."
+                )
+    
+    # ===================== HELPER METHODS =====================
+    def _get_admin_help(self, username):
+        """Get help message for admins"""
+        return (
+            f"👑 <b>ADMINISTRATOR PANEL</b>\n"
+            f"Welcome @{username}\n\n"
+            
+            f"📚 <b>ACADEMIC MANAGEMENT:</b>\n"
+            f"<code>/createassignment</code> - Create new assignment\n"
+            f"<code>/inbox</code> - View student submissions\n"
+            f"<code>/grade</code> - Grade student work\n"
+            f"<code>/assignmentstats</code> - View assignment statistics\n\n"
+            
+            f"📊 <b>ATTENDANCE MANAGEMENT:</b>\n"
+            f"<code>/markabsent @username</code> - Mark student absent\n"
+            f"<code>/liststudents</code> - View today's attendance\n"
+            f"<code>/present</code> - View present students only\n\n"
+            
+            f"👥 <b>USER MANAGEMENT:</b>\n"
+            f"<code>/addteacher</code> - Add new teacher\n"
+            f"<code>/removeteacher</code> - Remove teacher\n"
             f"<code>/listadmins</code> - List all admins\n"
             f"<code>/listteachers</code> - List all teachers\n\n"
             
-            f"🚫 <b>WARNING & BAN SYSTEM:</b>\n"
-            f"<code>/warn [username] [reason]</code> - Warn student\n"
-            f"<code>/viewwarnings [username]</code> - View warnings\n"
-            f"<code>/clearwarnings [username]</code> - Clear all warnings\n"
-            f"<code>/removewarning [username] [id]</code> - Remove warning\n"
-            f"<code>/ban [username] [reason]</code> - Ban student\n"
-            f"<code>/unban [username]</code> - Unban student\n"
-            f"<code>/bannedlist</code> - List banned students\n\n"
+            f"📊 <b>SYSTEM COMMANDS:</b>\n"
+            f"<code>/profile</code> - View profile & mark attendance\n"
+            f"<code>/status</code> - View system status\n"
+            f"<code>/attendance</code> - View attendance record\n\n"
             
-            f"👨‍🏫 <b>TEACHER COMMANDS:</b>\n"
-            f"<code>/markabsent [username]</code> - Mark absent\n"
-            f"<code>/liststudents</code> - View all students\n"
-            f"<code>/assign [subject] [title]</code> - Create assignment\n"
-            f"<code>/inbox</code> - View submissions\n"
-            f"<code>/grade [id] [student] [grade]</code> - Grade\n"
-            f"<code>/assignmentstats</code> - View stats\n\n"
+            f"👑 <b>SUPER ADMIN ONLY:</b>\n"
+            f"<code>/addadmin</code> - Add new admin\n"
+            f"<code>/removeadmin</code> - Remove admin\n\n"
             
-            f"👨‍🎓 <b>STUDENT COMMANDS:</b>\n"
-            f"<code>/profile</code> - Your profile\n"
-            f"<code>/attendance</code> - Your attendance\n"
-            f"<code>/assignments</code> - Your assignments\n"
-            f"<code>/submit</code> - Submit work\n"
-            f"<code>/grades</code> - Your grades\n\n"
-            
-            f"📋 <b>SYSTEM COMMANDS:</b>\n"
-            f"<code>/rules</code> - School rules\n"
-            f"<code>/about</code> - About bot\n"
-            f"<code>/help</code> - This menu\n\n"
-            
-            f"👮 <b>Super Admins:</b> @sh3ll_3xp10it, @dagi_tariku"
+            f"💡 <b>Tip:</b> Use /rules to see school rules"
         )
-        return response
     
     def _get_teacher_help(self, username):
-        """Get help for teachers"""
-        response = (
-            f"👨‍🏫 <b>TEACHER COMMANDS</b>\n"
-            f"🏫 {SCHOOL_NAME} - {GRADE}\n\n"
+        """Get help message for teachers"""
+        return (
+            f"👨‍🏫 <b>TEACHER PANEL</b>\n"
+            f"Welcome @{username}\n\n"
             
-            f"📝 <b>ATTENDANCE:</b>\n"
-            f"<code>/markabsent [username]</code> - Mark student absent\n"
-            f"<code>/liststudents</code> - View all students\n"
-            f"<code>/attendance [date]</code> - View attendance\n\n"
+            f"📚 <b>ASSIGNMENT MANAGEMENT:</b>\n"
+            f"<code>/createassignment</code> - Create new assignment\n"
+            f"<code>/inbox</code> - View student submissions\n"
+            f"<code>/grade</code> - Grade student work\n"
+            f"<code>/assignmentstats</code> - View assignment statistics\n\n"
             
-            f"📚 <b>ASSIGNMENTS:</b>\n"
-            f"<code>/assign [subject] [title]</code> - Create assignment\n"
-            f"<code>/inbox</code> - View submissions\n"
-            f"<code>/grade [id] [student] [grade]</code> - Grade assignment\n"
-            f"<code>/assignmentstats</code> - View statistics\n\n"
+            f"📊 <b>ATTENDANCE MANAGEMENT:</b>\n"
+            f"<code>/markabsent @username</code> - Mark student absent\n"
+            f"<code>/liststudents</code> - View today's attendance\n"
+            f"<code>/present</code> - View present students only\n\n"
             
-            f"⚠️ <b>DISCIPLINE:</b>\n"
-            f"<code>/warn [username] [reason]</code> - Warn student\n"
-            f"<code>/viewwarnings [username]</code> - Check warnings\n\n"
+            f"👥 <b>USER MANAGEMENT:</b>\n"
+            f"<code>/listteachers</code> - List all teachers\n"
+            f"<code>/status</code> - View system status\n\n"
             
-            f"👨‍🎓 <b>STUDENT COMMANDS:</b>\n"
-            f"<code>/profile</code> - Your profile\n"
-            f"<code>/attendance</code> - Your attendance\n"
-            f"<code>/assignments</code> - Your assignments\n"
-            f"<code>/submit</code> - Submit work\n"
-            f"<code>/grades</code> - Your grades\n\n"
+            f"👤 <b>PERSONAL COMMANDS:</b>\n"
+            f"<code>/profile</code> - View profile & mark attendance\n"
+            f"<code>/attendance</code> - View attendance record\n\n"
             
-            f"📋 <b>SYSTEM COMMANDS:</b>\n"
-            f"<code>/rules</code> - School rules\n"
-            f"<code>/about</code> - About bot\n"
-            f"<code>/help</code> - This menu\n\n"
+            f"💡 <b>How it works:</b>\n"
+            f"1. Create assignments for students\n"
+            f"2. Students submit their work\n"
+            f"3. Grade and provide feedback\n"
+            f"4. Track student progress\n\n"
             
-            f"👮 <b>Admins:</b> Contact @sh3ll_3xp10it or @dagi_tariku"
+            f"📞 <b>Contact admins for support</b>"
         )
-        return response
     
     def _get_student_help(self):
-        """Get help for students"""
-        response = (
-            f"👨‍🎓 <b>STUDENT COMMANDS</b>\n"
-            f"🏫 {SCHOOL_NAME} - {GRADE}\n\n"
+        """Get help message for students"""
+        return (
+            f"👨‍🎓 <b>STUDENT PANEL</b>\n"
+            f"Welcome to {SCHOOL_NAME} {GRADE}\n\n"
             
-            f"✅ <b>ATTENDANCE:</b>\n"
-            f"<code>/profile</code> - Auto-mark present & view profile\n"
-            f"<code>/attendance</code> - View your attendance record\n\n"
-            
-            f"📚 <b>ASSIGNMENTS:</b>\n"
+            f"📚 <b>ASSIGNMENT SYSTEM:</b>\n"
             f"<code>/assignments</code> - View your assignments\n"
             f"<code>/receive [id]</code> - Receive an assignment\n"
-            f"<code>/submit [id] [work]</code> - Submit assignment\n"
+            f"<code>/submit [id] [work]</code> - Submit completed work\n"
             f"<code>/grades</code> - View your grades\n\n"
             
-            f"📋 <b>SYSTEM COMMANDS:</b>\n"
+            f"📊 <b>ATTENDANCE SYSTEM:</b>\n"
+            f"<code>/profile</code> - View profile & AUTO mark present\n"
+            f"<code>/attendance</code> - View attendance record\n"
+            f"<code>/markpresent</code> - Manually mark present\n\n"
+            
+            f"ℹ️ <b>INFORMATION:</b>\n"
+            f"<code>/about</code> - About this bot\n"
             f"<code>/rules</code> - School rules\n"
-            f"<code>/about</code> - About the bot\n"
-            f"<code>/help</code> - This menu\n\n"
+            f"<code>/status</code> - System status\n\n"
             
-            f"💡 <b>IMPORTANT:</b>\n"
-            f"• Use /profile daily to mark attendance\n"
-            f"• Submit assignments before due date\n"
-            f"• Check /grades regularly\n\n"
+            f"💡 <b>How it works:</b>\n"
+            f"1. Check /profile daily (auto attendance)\n"
+            f"2. View assignments with /assignments\n"
+            f"3. Receive assignments with /receive\n"
+            f"4. Submit work with /submit\n"
+            f"5. Check grades with /grades\n\n"
             
-            f"👮 <b>Contact Teachers:</b> Use username mentions"
+            f"📞 <b>Contact teachers for help with assignments</b>"
         )
-        return response
     
     def _get_rules(self):
         """Get school rules"""
-        rules = (
-            f"📜 <b>SCHOOL RULES & GUIDELINES</b>\n"
-            f"🏫 {SCHOOL_NAME} - {GRADE}\n\n"
+        return (
+            f"📜 <b>SCHOOL RULES - {SCHOOL_NAME}</b>\n\n"
             
-            f"✅ <b>ATTENDANCE POLICY:</b>\n"
-            f"1. Use /profile daily to mark attendance\n"
-            f"2. Attendance is auto-recorded at 00:00-23:59\n"
-            f"3. Late attendance may be marked absent\n"
-            f"4. Contact teacher if marked absent by mistake\n\n"
+            f"🏫 <b>ATTENDANCE POLICY:</b>\n"
+            f"• Use /profile daily to mark attendance\n"
+            f"• Minimum 80% attendance required\n"
+            f"• Report absences to administration\n\n"
             
             f"📚 <b>ASSIGNMENT POLICY:</b>\n"
-            f"1. Receive assignments using /receive [id]\n"
-            f"2. Submit before due date\n"
-            f"3. Late submissions may receive penalty\n"
-            f"4. Plagiarism is strictly prohibited\n\n"
+            f"• Submit assignments before deadline\n"
+            f"• Use /receive before submitting\n"
+            f"• Late submissions may affect grades\n"
+            f"• Plagiarism is strictly prohibited\n\n"
             
-            f"⚠️ <b>CODE OF CONDUCT:</b>\n"
-            f"1. Respect all teachers and students\n"
-            f"2. No spam or inappropriate content\n"
-            f"3. 3 warnings = automatic ban\n"
-            f"4. Serious offenses = immediate ban\n\n"
+            f"👥 <b>BEHAVIOR POLICY:</b>\n"
+            f"• Respect teachers and classmates\n"
+            f"• Maintain academic integrity\n"
+            f"• Follow all instructions carefully\n"
+            f"• Report issues to administrators\n\n"
             
-            f"🚫 <b>GROUNDS FOR WARNING/BAN:</b>\n"
-            f"• Missing multiple assignments\n"
-            f"• Disruptive behavior\n"
-            f"• Academic dishonesty\n"
-            f"• Harassment or bullying\n"
-            f"• Spamming the bot\n\n"
+            f"💻 <b>TECHNICAL RULES:</b>\n"
+            f"• Keep your Telegram account secure\n"
+            f"• Don't share assignment IDs\n"
+            f"• Report technical issues\n"
+            f"• Save your student ID for reference\n\n"
             
-            f"📞 <b>CONTACT:</b>\n"
-            f"👑 Super Admins: @sh3ll_3xp10it, @dagi_tariku\n"
-            f"📧 Email: administration@aspire.edu"
+            f"👑 <b>Super Admins:</b> @sh3ll_3xp10it, @dagi_tariku\n"
+            f"📞 Contact for rule clarification"
         )
-        return rules
     
     def run(self):
         """Start the bot"""
         print("🤖 Bot is running...")
         print("🔄 Waiting for messages...")
+        print("=" * 60)
         self.bot.infinity_polling()
 
-# ===================== MAIN EXECUTION =====================
+# ===================== MAIN ENTRY POINT =====================
 if __name__ == "__main__":
     # Create necessary files if they don't exist
-    for file in [ADMINS_FILE, TEACHERS_FILE, ATTENDANCE_FILE, 
-                 ASSIGNMENTS_FILE, SUBMISSIONS_FILE, WARNINGS_FILE]:
-        if not os.path.exists(file):
-            with open(file, 'w') as f:
-                json.dump({} if "warnings" in file else [], f)
+    for filename in [ADMINS_FILE, TEACHERS_FILE, ATTENDANCE_FILE, ASSIGNMENTS_FILE, SUBMISSIONS_FILE]:
+        if not os.path.exists(filename):
+            with open(filename, 'w') as f:
+                json.dump([] if filename in [ADMINS_FILE, TEACHERS_FILE] else {}, f)
     
-    # Start the bot
     bot = AssignmentBot()
     bot.run()
